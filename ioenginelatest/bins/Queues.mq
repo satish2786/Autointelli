@@ -1,0 +1,14 @@
+e:EVM				q:incoming_events		r:incoming_events
+e:EVM				q:filtered_events		r:filtered_events
+e:EVM				q:pe_events				r:pe_events
+e:EVM				q:newkb					r:newkb
+e:automationengine	q:processevents			r:automation.processevents
+e:automationengine	q:executeautomation		r:automation.execute_automation
+e:automationengine               q:d2m                   r:d2m
+e:automation		q:bot_email_mgmt		r:bot_email_mgmt
+e:monitoring		q:infra_monitoring_ack	r:infra_monitoring_ack
+e:monitoring		q:infra_monitoring		r:infra_monitoring
+
+e:EVM   q:kb_batch_processing   r:kb_batch_processing
+e:EVM   q:datalake              r:datalake
+

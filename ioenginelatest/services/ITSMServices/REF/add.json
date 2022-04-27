@@ -1,0 +1,14 @@
+{
+	"itsmid": 1,
+	"communication_type": "http",
+	"ip": "localhost",
+	"port": "3890",
+	"username": "root@localhost",
+	"password": "123456",
+	"assignment_group_automation": "Automation",
+	"assignment_group_manual": "Manual",
+	"itsm_status": "open",
+	"priority": "3 normal",
+	"customer_name": "democustomer",
+	"created_by": "admin"
+}

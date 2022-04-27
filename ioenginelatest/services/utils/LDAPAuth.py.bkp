@@ -1,0 +1,48 @@
+import ldap
+import services.utils.ConnPostgreSQL as con
+from services.utils.ConnLog import create_log_file
+
+import services.utils.LFColors as lfc
+lfcObj = lfc.bcolors()
+CERROR, CWARN = lfcObj.printerr, lfcObj.printwar
+
+logObj = create_log_file()
+if not logObj:
+    CERROR("Not able to create logfile")
+    exit(0)
+logERROR, logWARN, logINFO = logObj.error, logObj.warn, logObj.info
+
+def authenticate(username, password):
+    # Fetch LDAP or LDAPS details from database
+    sIP, sPort, sCommType = "", "", ""
+    sLDAPQuery = "select configip, configport, communicationtype from configuration where configname='LDAP'"
+    dLDRet = con.returnSelectQueryResult(sLDAPQuery)
+    if dLDRet["result"] == "success":
+        sIP = dLDRet["data"][0]["configip"]
+        sPort = dLDRet["data"][0]["configport"]
+        sCommType = dLDRet["data"][0]["communicationtype"]
+    else:
+        return {"result": "failure", "data": "Unable to fetch details of LDAP from database"}
+
+    #Connect to LDAP
+    conn = ldap.initialize(sCommType + '://' + sIP + ":" + str(sPort))
+    conn.protocol_version = 3
+    conn.set_option(ldap.OPT_REFERRALS, 0)
+    try:
+        result = conn.simple_bind_s(username, password)
+    except ldap.INVALID_CREDENTIALS:
+        logERROR("Invalid Credentials passed for {0}".format(username))
+        return {"result": "failure", "data": "Invalid credentials"}
+    except ldap.SERVER_DOWN:
+        logERROR("LDAP Server is not reachable or down")
+        return {"result": "failure", "data": "Server down"}
+    except ldap.LDAPError as e:
+        if type(e.message) == dict and e.message.has_key('desc'):
+            logERROR(str(e.message['desc']))
+            return {"result": "failure", "data": "Other LDAP error: " + e.message['desc']}
+        else:
+            logERROR(str(e))
+            return {"result": "failure", "data": "Other LDAP error: " + e}
+    finally:
+        conn.unbind_s()
+    return {"result": "success", "data": "Successfully authenticated"}

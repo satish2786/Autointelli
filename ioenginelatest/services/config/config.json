@@ -1,0 +1,70 @@
+{
+	"ui":{
+        "dbname" : "autointelli",
+        "username" : "autointelli",
+        "password" : "w4LDqsOow57CisOcw6jDisOYw5jCig==",
+        "dbip" : "127.0.0.1",
+        "dbport" : 5432
+    },
+    "monitor_maria":{
+        "dbname" : "nagios",
+        "username" : "ndoutils",
+        "password" : "ndoutils_password",
+        "dbip" : "127.0.0.1",
+        "dbport" : 3306
+    },
+    "jbpm":{
+        "dbname" : "kieserver",
+        "username" : "kieserver",
+        "password" : "w4zDnsOZw6LChsOgw6rDisOe",
+        "dbip" : "127.0.0.1",
+        "dbport" : 5432
+    },
+    "jcentral":{
+        "dbname" : "kiewb",
+        "username" : "kiewb",
+        "password" : "w4zDnsOZw6bCgw==",
+        "dbip" : "127.0.0.1",
+        "dbport" : 5432
+    },
+    "monitor": {
+        "url": "10.210.45.101:80"
+    },
+    "perf":{
+        "url": "10.227.45.114:81"
+    },
+    "bandwidth":{
+        "url": "https://r2d2.nxtgen.com"
+    },
+	"maindb": {
+        "dbname": "autointelli",
+        "username": "autointelli",
+        "password": "w4LDqsOow57CisOcw6jDisOYw5jCig==",
+        "dbip": "127.0.0.1",
+        "dbport": 5432
+    },
+    "log": {
+        "eventreceiver": "/var/log/autointelli/eventreceiver.log",
+        "automationengine": "/var/log/autointelli/automationengine.log",
+        "a2e": "/var/log/autointelli/anomaly2event.log",
+        "anomaly": "/var/log/autointelli/anomaly.log",
+        "automation": "/var/log/autointelli/orch.log",
+        "all": "/var/log/autointelli/server.log",
+        "cmdb": "/var/log/autointelli/cmdb.log",
+        "cmdbworker": "/var/log/autointelli/cmdbworker.log",
+        "itsm": "/var/log/autointelli/SDP.log"
+    },
+    "a2e": {
+        "api": "http://10.227.45.114:5006/evm/api1.0/endpoints/eventreceiver"
+    },
+    "onapploc": "blr-",
+    "audit_video": "https://oikotechno.autointelli.com/iress/downloads/videos/",
+    "pam": {"arcon": {
+        "ip": "10.21.21.143",
+        "port": "9091",
+        "username": "cGFtYXBpdGVzdA==",
+        "password": "VGVzdEAx"
+    }},
+    "fqdn": "https://oikotechno.autointelli.com",
+    "pvault": "iress"
+}

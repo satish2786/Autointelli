@@ -1,0 +1,42 @@
+---
+- hosts: all
+  gather_facts: True
+  vars_files:
+    - /usr/local/autointelli/ioengine/services/cmdb/.secrets/{{ KPI }}.yml
+  tasks:
+    - name: Get CPU USage
+      win_command: powershell.exe "Get-WmiObject win32_processor | Measure-Object -property LoadPercentage -Average | Select Average  -expandproperty Average"
+      register: cpuusage
+    
+    - name: Get Memory Usage
+      win_command: powershell.exe "$ComputerMemory = Get-WmiObject -Class win32_operatingsystem -ErrorAction Stop;$Memory = ((($ComputerMemory.TotalVisibleMemorySize - $ComputerMemory.FreePhysicalMemory)*100)/ $ComputerMemory.TotalVisibleMemorySize);write-host $Memory"
+      register: memusage
+     
+    - name: Get Total Disk Usage
+      win_command:  powershell.exe "Get-WmiObject -class win32_logicaldisk | Measure-Object -Sum size | Select-Object Sum -ExpandProperty Sum"
+      register: TotalDiskSize
+
+    - name: Free Disk Size
+      win_command:  powershell.exe "Get-WmiObject -class win32_logicaldisk | Measure-Object -Sum freespace | Select-Object Sum -ExpandProperty Sum"
+      register: FreeDiskSize
+
+    - name: Get Swap USage Current in mb
+      win_command: powershell.exe "Get-WmiObject -class Win32_PageFileUsage | Select-Object  CurrentUsage -ExpandProperty CurrentUsage"
+      register: SwapUsed
+
+    - name: Get Swap Total in mb
+      win_command: powershell.exe "Get-WmiObject -class Win32_PageFileUsage | Select-Object  CurrentUsage -ExpandProperty AllocatedBaseSize"
+      register: SwapTotal
+
+    - name: Register FreeDiskSpace as a fact
+      set_fact:
+        cpuusage: "{{ cpuusage.stdout }}"
+        memusage: "{{ memusage.stdout }}"
+        totaldisk: "{{ TotalDiskSize.stdout }}"  
+        freedisk: "{{ FreeDiskSize.stdout }}"  
+        swapused: "{{ SwapUsed.stdout }}"
+        swaptotal: "{{ SwapTotal.stdout }}"
+        cacheable: True
+
+    - name: Gather Facts
+      debug: msg="Facts Gathered Successfully"

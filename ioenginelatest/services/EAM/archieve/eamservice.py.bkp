@@ -1,0 +1,1379 @@
+#============================================================================================
+# Author        : Dinesh Balaraman
+# Created On    :
+# (c) Copyright by Autointelli Technologies
+#============================================================================================
+
+from flask import Flask, jsonify, request
+import json
+from services.utils import ConnPostgreSQL
+from services.utils import sessionkeygen
+from copy import deepcopy
+import requests as restcall
+from services.utils.decoder import decode
+
+def lam_api_key_missing():
+    return json.dumps({"result": "failure", "data": "api-key missing"})
+
+def lam_api_key_invalid():
+    return json.dumps({"result": "failure", "data": "invalid api-key"})
+
+lam_api_key_missing = lam_api_key_missing()
+lam_api_key_invalid = lam_api_key_invalid()
+
+def getTimeZone(sKey):
+    dRet = sessionkeygen.getUserDetailsBasedWithSessionKey(sKey)
+    if dRet["result"] == "success":
+        return dRet["data"][0]["time_zone"]
+    else:
+        return "no data"
+
+def chkValidRequest(key):
+    sQuery = "select * from tbl_session_keys where session_key='" + key + "' and active_yn='Y'"
+    dRet = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+    if dRet["result"] == "success":
+        return True
+    else:
+        return False
+
+def chkKeyExistsInHeader(key):
+    try:
+        #print(request.headers)
+        tmp = request.headers["SESSIONKEY"]
+        return True
+    except KeyError as e:
+        return False
+    except Exception as e:
+        return False
+
+def getAlerts(from_offset, count_limit):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sCountQuery = "select count(*) as total from alert_data"
+                sPaging = "select pk_alert_id from alert_data order by pk_alert_id desc limit " + count_limit + " offset " + from_offset
+                sQuery = """select
+        concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, a.ci_name as aci_name, a.component as acomponent, a.description as adescription, a.notes as anotes, a.severity as aseverity, TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS')  as alert_created_time, a.source as asource, s.stat_description as astatus,
+        concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, e.ci_name, e.component, e.description, e.notes, e.severity,TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time , e.source, s.stat_description as status,
+        (CASE when ae.automationid is not null then concat('A',lpad(cast(ae.automationid as text),14,'0')) else null END) as automationid, ae.automationstatus,ae.start_time, ae.end_time, ae.itsmid, ae.itsmstatus
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join automationengine ae on (a.pk_alert_id = CAST( ae.alertid as BIGINT))
+where
+        a.fk_status_id = s.pk_ea_status_id and
+        e.fk_status_id = s.pk_ea_status_id and
+        a.pk_alert_id = ea.fk_alert_id and
+        e.pk_event_id = ea.fk_event_id and a.pk_alert_id in(""" + sPaging + """)
+order by
+        a.pk_alert_id desc"""
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResultAs2DList(sQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    lModAsStr = [list(map(str, i)) for i in dRet['data']]
+                    setUniqueAlert = set([i[0] for i in lModAsStr[1:]])
+                    #print(setUniqueAlert)
+                    lPack = [dict(zip(lModAsStr[0], i)) for i in lModAsStr[1:]]
+                    lAllAlert = []
+                    for eachA in setUniqueAlert:
+                        lOneAlert, dOneAlert = [], {}
+                        for eachD in lPack:
+                            if eachD["alertid"] == eachA:
+                                lOneAlert.append(deepcopy(eachD))#
+                        dOneAlert["alertid"] = eachA
+                        dOneAlert["aci_name"] = lOneAlert[0]["aci_name"]
+                        dOneAlert["acomponent"] = lOneAlert[0]["acomponent"]
+                        dOneAlert["adescription"] = lOneAlert[0]["adescription"]
+                        dOneAlert["anotes"] = lOneAlert[0]["anotes"]
+                        dOneAlert["aseverity"] = lOneAlert[0]["aseverity"]
+                        dOneAlert["alert_created_time"] = lOneAlert[0]["alert_created_time"]
+                        dOneAlert["asource"] = lOneAlert[0]["asource"]
+                        dOneAlert["astatus"] = lOneAlert[0]["astatus"]
+                        dOneAlert["automationid"] = lOneAlert[0]["automationid"]
+                        dOneAlert["automationstatus"] = lOneAlert[0]["automationstatus"]
+                        dOneAlert["start_time"] = lOneAlert[0]["start_time"]
+                        dOneAlert["end_time"] = lOneAlert[0]["end_time"]
+                        dOneAlert["itsmid"] = lOneAlert[0]["itsmid"]
+                        dOneAlert["itsmstatus"] = lOneAlert[0]["itsmstatus"]
+                        lTmp = [i.pop(j) for i in lOneAlert for j in ["alertid", "aci_name", "acomponent", "adescription", "anotes", "aseverity", "alert_created_time", "asource", "astatus", "automationid", "automationstatus", "start_time", "end_time", "itsmid", "itsmstatus"]]
+                        dOneAlert["associated_events"] = sorted(lOneAlert, key=lambda k: k['eventid'],reverse=True)
+                        #print(dOneAlert)
+                        lAllAlert.append(dOneAlert)
+                    lAllAlertDesc = sorted(lAllAlert, key=lambda k: k['alertid'],reverse=True)
+                    return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": dRetCnt["data"][0]["total"]}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load alert details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getAlertsBasedOnStatus(pStatus, from_offset, count_limit):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from alert_data where " + sStatusCond
+                sPaging = "select pk_alert_id from alert_data where " + sStatusCond + " order by pk_alert_id desc limit " + count_limit + " offset " + from_offset
+                sQuery = """select
+        concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, a.ci_name as aci_name, a.component as acomponent, a.description as adescription, a.notes as anotes, a.severity as aseverity,TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS')  as alert_created_time, a.source as asource, s.stat_description as astatus,
+        concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, e.ci_name,e.component, e.description, e.notes, e.severity,TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status,
+        (CASE when ae.automationid is not null then concat('A',lpad(cast(ae.automationid as text),14,'0')) else null END) as automationid, ae.automationstatus,ae.start_time, ae.end_time, ae.itsmid, ae.itsmstatus
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join automationengine ae on (a.pk_alert_id = CAST( ae.alertid as BIGINT))
+where
+        a.fk_status_id = s.pk_ea_status_id and
+        e.fk_status_id = s.pk_ea_status_id and
+        a.pk_alert_id = ea.fk_alert_id and
+        e.pk_event_id = ea.fk_event_id and a.pk_alert_id in(""" + sPaging + """)
+order by
+        a.pk_alert_id desc"""
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                #s.stat_description = '""" + pStatus + """'
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResultAs2DList(sQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    lModAsStr = [list(map(str, i)) for i in dRet['data']]
+                    setUniqueAlert = set([i[0] for i in lModAsStr[1:]])
+                    #print(setUniqueAlert)
+                    lPack = [dict(zip(lModAsStr[0], i)) for i in lModAsStr[1:]]
+                    lAllAlert = []
+                    for eachA in setUniqueAlert:
+                        lOneAlert, dOneAlert = [], {}
+                        for eachD in lPack:
+                            if eachD["alertid"] == eachA:
+                                lOneAlert.append(deepcopy(eachD))#
+                        dOneAlert["alertid"] = eachA
+                        dOneAlert["aci_name"] = lOneAlert[0]["aci_name"]
+                        dOneAlert["acomponent"] = lOneAlert[0]["acomponent"]
+                        dOneAlert["adescription"] = lOneAlert[0]["adescription"]
+                        dOneAlert["anotes"] = lOneAlert[0]["anotes"]
+                        dOneAlert["aseverity"] = lOneAlert[0]["aseverity"]
+                        dOneAlert["alert_created_time"] = lOneAlert[0]["alert_created_time"]
+                        dOneAlert["asource"] = lOneAlert[0]["asource"]
+                        dOneAlert["astatus"] = lOneAlert[0]["astatus"]
+                        dOneAlert["automationid"] = lOneAlert[0]["automationid"]
+                        dOneAlert["automationstatus"] = lOneAlert[0]["automationstatus"]
+                        dOneAlert["start_time"] = lOneAlert[0]["start_time"]
+                        dOneAlert["end_time"] = lOneAlert[0]["end_time"]
+                        dOneAlert["itsmid"] = lOneAlert[0]["itsmid"]
+                        dOneAlert["itsmstatus"] = lOneAlert[0]["itsmstatus"]
+                        lTmp = [i.pop(j) for i in lOneAlert for j in ["alertid", "aci_name", "acomponent", "adescription", "anotes", "aseverity", "alert_created_time", "asource", "astatus", "automationid", "automationstatus", "start_time", "end_time", "itsmid", "itsmstatus"]]
+                        dOneAlert["associated_events"] = sorted(lOneAlert, key=lambda k: k['eventid'],reverse=True)
+                        #print(dOneAlert)
+                        lAllAlert.append(dOneAlert)
+                    lAllAlertDesc = sorted(lAllAlert, key=lambda k: k['alertid'], reverse=True)
+                    return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": dRetCnt["data"][0]["total"]}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load alert details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getEvents(from_offset, count_limit):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sCountQuery = "select count(*) as total from event_data"
+                sPaging = "select pk_event_id from event_data order by pk_event_id desc limit " + count_limit + " offset " + from_offset
+                sQuery = """select
+	concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, e.ci_name, e.component, e.description, e.notes, e.severity, TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status
+from
+	event_data e, alert_data a, ea_status s, event_alert_mapping ea
+where
+	a.fk_status_id = s.pk_ea_status_id and
+	e.fk_status_id = s.pk_ea_status_id and
+	a.pk_alert_id = ea.fk_alert_id and
+	e.pk_event_id = ea.fk_event_id and e.pk_event_id in(""" + sPaging + """)
+order by
+	e.pk_event_id desc"""
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'")
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    return json.dumps({"result": "success", "data": {"event": dRet["data"], "count": dRetCnt["data"][0]["total"]}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load event details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getEventsBasedOnStatus(pStatus, from_offset, count_limit):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from event_data where " + sStatusCond
+                sPaging = "select pk_event_id from event_data where " + sStatusCond + " order by pk_event_id desc limit " + count_limit + " offset " + from_offset
+                sQuery = """select
+	concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, e.ci_name, e.component, e.description, e.notes, e.severity, TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status
+from
+	event_data e, alert_data a, ea_status s, event_alert_mapping ea
+where
+	a.fk_status_id = s.pk_ea_status_id and
+	e.fk_status_id = s.pk_ea_status_id and
+	a.pk_alert_id = ea.fk_alert_id and
+	e.pk_event_id = ea.fk_event_id and e.pk_event_id in(""" + sPaging + """)
+order by
+	e.pk_event_id desc"""
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'")
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    return json.dumps({"result": "success", "data": {"event": dRet["data"], "count": dRetCnt["data"][0]["total"]}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load event details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def updateAlertAndAssociatedEvents(alert_id, status):
+    """Method: update the alert status and associated event's status."""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                # iAlertID = int(alert_id[1:])
+                sAlertQuery = "update alert_data set fk_status_id=(select pk_ea_status_id from ea_status where active_yn='Y' and stat_description='" + status + "') where pk_alert_id = " + str(alert_id)
+                sEventQuery = "update event_data set fk_status_id=(select pk_ea_status_id from ea_status where active_yn='Y' and stat_description='" + status + "') where pk_event_id in(select fk_event_id from  event_alert_mapping where fk_alert_id= " + str(alert_id) + ")"
+                iRetA = ConnPostgreSQL.returnInsertResult(sAlertQuery)
+                iRetE = ConnPostgreSQL.returnInsertResult(sEventQuery)
+                if iRetA["result"] == "success" and iRetE["result"] == "success":
+                    return json.dumps({"result": "success", "data": "Alert and associated Events updated"})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to update Alert and Events"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getAlertsStatusGroupBy():
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sQuery = """select ea.stat_description, coalesce(e.cnt,0) from ea_status ea left join (select fk_status_id, count(fk_status_id) cnt from alert_data group by fk_status_id) e 
+ on (ea.pk_ea_status_id=e.fk_status_id)"""
+                dRet = ConnPostgreSQL.returnSelectQueryResultConvert2Col2Dict(sQuery)
+                if dRet["result"] == "success":
+                    return json.dumps(dRet)
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load alert details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getEventssStatusGroupBy():
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sQuery = """select ea.stat_description, coalesce(e.cnt,0) from ea_status ea left join (select fk_status_id, count(fk_status_id) cnt from event_data group by fk_status_id) e 
+ on (ea.pk_ea_status_id=e.fk_status_id)"""
+                dRet = ConnPostgreSQL.returnSelectQueryResultConvert2Col2Dict(sQuery)
+                if dRet["result"] == "success":
+                    return json.dumps(dRet)
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load event details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getAlertsBasedOnFilter(pStatus, from_offset, count_limit, dPayload):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sFilterCond = ""
+                for eachCond in dPayload.keys():
+                    if eachCond == "alert_id":
+                        sFilterCond += " concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) like '%" + dPayload[eachCond] + "%' and "
+                    elif eachCond == "ciname":
+                        sFilterCond += " lower(a.ci_name) like '%" + dPayload[eachCond].lower() + "%' and "
+                    elif eachCond == "component":
+                        sFilterCond += " lower(a.component) like '%" + dPayload[eachCond].lower() + "%' and "
+                    elif eachCond == "datetime":
+                        sFilterCond += " to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY'), 'DD/MM/YYYY') >= to_date('" + dPayload[eachCond].split("__")[0].replace("_","/") + "', 'DD/MM/YYYY') and to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {1}, 'DD/MM/YYYY'), 'DD/MM/YYYY') <= to_date('" + dPayload[eachCond].split("__")[1].replace("_","/") + "', 'DD/MM/YYYY') and ".format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                    elif eachCond == "status":
+                        sFilterCond += " lower(s.stat_description) = '" + dPayload[eachCond].lower() + "' and "
+                    elif eachCond == "autoid":
+                        sFilterCond += " (CASE when ae.automationid is not null then concat('A',lpad(cast(ae.automationid as text),14,'0')) else null END) like '%" + dPayload[eachCond] + "%' and "
+                    elif eachCond == "ticketid":
+                        sFilterCond += " ae.itsmid = '" + dPayload[eachCond] + "' and "
+                sFilterCond = sFilterCond[:-4]
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from alert_data where " + sStatusCond
+                sPaging = "select pk_alert_id from alert_data where " + sStatusCond + " order by pk_alert_id desc limit " + count_limit + " offset " + from_offset
+                sQuery = """select
+        concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, a.ci_name as aci_name, a.component as acomponent, a.description as adescription, a.notes as anotes, a.severity as aseverity,TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS')  as alert_created_time, a.source as asource, s.stat_description as astatus,
+        concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, e.ci_name,e.component, e.description, e.notes, e.severity,TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status,
+        (CASE when ae.automationid is not null then concat('A',lpad(cast(ae.automationid as text),14,'0')) else null END) as automationid, ae.automationstatus,ae.start_time, ae.end_time, ae.itsmid, ae.itsmstatus
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join automationengine ae on (a.pk_alert_id = CAST( ae.alertid as BIGINT))
+where
+        a.fk_status_id = s.pk_ea_status_id and
+        e.fk_status_id = s.pk_ea_status_id and
+        a.pk_alert_id = ea.fk_alert_id and
+        e.pk_event_id = ea.fk_event_id and """ + sFilterCond + """ and a.pk_alert_id in(""" + sPaging + """)
+order by
+        a.pk_alert_id desc"""
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                #s.stat_description = '""" + pStatus + """'
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResultAs2DList(sQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    lModAsStr = [list(map(str, i)) for i in dRet['data']]
+                    setUniqueAlert = set([i[0] for i in lModAsStr[1:]])
+                    #print(setUniqueAlert)
+                    lPack = [dict(zip(lModAsStr[0], i)) for i in lModAsStr[1:]]
+                    lAllAlert = []
+                    for eachA in setUniqueAlert:
+                        lOneAlert, dOneAlert = [], {}
+                        for eachD in lPack:
+                            if eachD["alertid"] == eachA:
+                                lOneAlert.append(deepcopy(eachD))#
+                        dOneAlert["alertid"] = eachA
+                        dOneAlert["aci_name"] = lOneAlert[0]["aci_name"]
+                        dOneAlert["acomponent"] = lOneAlert[0]["acomponent"]
+                        dOneAlert["adescription"] = lOneAlert[0]["adescription"]
+                        dOneAlert["anotes"] = lOneAlert[0]["anotes"]
+                        dOneAlert["aseverity"] = lOneAlert[0]["aseverity"]
+                        dOneAlert["alert_created_time"] = lOneAlert[0]["alert_created_time"]
+                        dOneAlert["asource"] = lOneAlert[0]["asource"]
+                        dOneAlert["astatus"] = lOneAlert[0]["astatus"]
+                        dOneAlert["automationid"] = lOneAlert[0]["automationid"]
+                        dOneAlert["automationstatus"] = lOneAlert[0]["automationstatus"]
+                        dOneAlert["start_time"] = lOneAlert[0]["start_time"]
+                        dOneAlert["end_time"] = lOneAlert[0]["end_time"]
+                        dOneAlert["itsmid"] = lOneAlert[0]["itsmid"]
+                        dOneAlert["itsmstatus"] = lOneAlert[0]["itsmstatus"]
+                        lTmp = [i.pop(j) for i in lOneAlert for j in ["alertid", "aci_name", "acomponent", "adescription", "anotes", "aseverity", "alert_created_time", "asource", "astatus", "automationid", "automationstatus", "start_time", "end_time", "itsmid", "itsmstatus"]]
+                        dOneAlert["associated_events"] = sorted(lOneAlert, key=lambda k: k['eventid'],reverse=True)
+                        #print(dOneAlert)
+                        lAllAlert.append(dOneAlert)
+                    lAllAlertDesc = sorted(lAllAlert, key=lambda k: k['alertid'], reverse=True)
+                    return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": dRetCnt["data"][0]["total"]}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load alert details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getEventsBasedOnFilter(pStatus, from_offset, count_limit, dPayload):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sFilterCond = ""
+                for eachCond in dPayload.keys():
+                    if eachCond == "event_id":
+                        sFilterCond += " concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) like '%" + dPayload[
+                            eachCond] + "%' and "
+                    elif eachCond == "ciname":
+                        sFilterCond += " lower(e.ci_name) like '%" + dPayload[eachCond].lower() + "%' and "
+                    elif eachCond == "component":
+                        sFilterCond += " lower(e.component) like '%" + dPayload[eachCond].lower() + "%' and "
+                    elif eachCond == "datetime":
+                        sFilterCond += " to_date(TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {0}, 'DD/MM/YYYY'), 'DD/MM/YYYY') >= to_date('" + \
+                                       dPayload[eachCond].split("__")[0].replace("_",
+                                                                                 "/") + "', 'DD/MM/YYYY') and to_date(TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY'), 'DD/MM/YYYY') <= to_date('" + \
+                                       dPayload[eachCond].split("__")[1].replace("_", "/") + "', 'DD/MM/YYYY') and ".format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                    elif eachCond == "status":
+                        sFilterCond += " lower(s.stat_description) = '" + dPayload[eachCond].lower() + "' and "
+                    elif eachCond == "source":
+                        sFilterCond += " lower(e.source) like '%" + dPayload[eachCond].lower() + "%' and "
+                    elif eachCond == "severity":
+                        sFilterCond += " lower(e.severity) = '" + dPayload[eachCond].lower() + "' and "
+                sFilterCond = sFilterCond[:-4]
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from event_data where " + sStatusCond
+                sPaging = "select pk_event_id from event_data where " + sStatusCond + " order by pk_event_id desc limit " + count_limit + " offset " + from_offset
+                sQuery = """select
+	concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, e.ci_name, e.component, e.description, e.notes, e.severity, TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status
+from
+	event_data e, alert_data a, ea_status s, event_alert_mapping ea
+where
+	a.fk_status_id = s.pk_ea_status_id and
+	e.fk_status_id = s.pk_ea_status_id and
+	a.pk_alert_id = ea.fk_alert_id and
+	e.pk_event_id = ea.fk_event_id and """ + sFilterCond + """ and e.pk_event_id in(""" + sPaging + """)
+order by
+	e.pk_event_id desc"""
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'")
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    return json.dumps({"result": "success", "data": {"event": dRet["data"], "count": dRetCnt["data"][0]["total"]}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load event details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getAlertsBasedOnStatusFilterOrderBy1(pStatus, from_offset, count_limit, filter_key, filter_value, column_sort):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sFilterQuery, sSortQuery = "", ""
+
+                #Applying Filter on colums = Basic Search
+                if filter_key == "alert_id":
+                    sFilterQuery += " concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "ciname":
+                    sFilterQuery += " lower(a.ci_name) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "component":
+                    sFilterQuery += " lower(a.component) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "datetime":
+                    sFilterQuery += " to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY'), 'DD/MM/YYYY') >= to_date('" + \
+                                       filter_value.split("__")[0].replace("_",
+                                                                                 "/") + "', 'DD/MM/YYYY') and to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {1}, 'DD/MM/YYYY'), 'DD/MM/YYYY') <= to_date('" + \
+                                       filter_value.split("__")[1].replace("_", "/") + "', 'DD/MM/YYYY') and ".format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                elif filter_key == "autoid":
+                    sFilterQuery += " (CASE when ae.automationid is not null then concat('A',lpad(cast(ae.automationid as text),14,'0')) else null END) like '%" + \
+                                       filter_value.lower() + "%' and "
+                elif filter_key == "ticketid":
+                    sFilterQuery += " ae.itsmid = '" + filter_value.lower() + "' and "
+                elif filter_key == "null":
+                    sFilterQuery += " 1=1 and "
+                sFilterQuery = sFilterQuery[:-4]
+
+                #Applying sorting = ASC and DESC
+                adCol = column_sort[:-2]
+                #adColSort = "asc" if column_sort[-1] == "a" else "desc"
+                adColSort = False if column_sort[-1] == "a" else True
+                if column_sort == "null":
+                    #sSortQuery += " a.pk_alert_id desc"
+                    sSortQuery = "alertid"
+                else:
+                    if adCol == "alert_id":
+                        #sSortQuery += " a.pk_alert_id " + adColSort
+                        sSortQuery = "alertid"
+                    elif adCol == "ciname":
+                        sSortQuery = "aci_name"
+                    elif adCol == "component":
+                        sSortQuery = "acomponent"
+                    elif adCol == "datetime":
+                        sSortQuery = "alertid"
+                    elif adCol == "autoid":
+                        sSortQuery = "automationid"
+                    elif adCol == "ticketid":
+                        sSortQuery = "itsmid"
+
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from alert_data where " + sStatusCond
+                sPaging = "select pk_alert_id from alert_data where " + sStatusCond + " order by pk_alert_id desc limit " + count_limit + " offset " + from_offset
+                #sPaging = " limit " + count_limit + " offset " + from_offset
+                sQuery = """select
+        concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, a.ci_name as aci_name, a.component as acomponent, a.description as adescription, a.notes as anotes, a.severity as aseverity,TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS')  as alert_created_time, a.source as asource, s.stat_description as astatus,
+        concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, e.ci_name,e.component, e.description, e.notes, e.severity,TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status,
+        (CASE when ae.automationid is not null then concat('A',lpad(cast(ae.automationid as text),14,'0')) else null END) as automationid, ae.automationstatus,ae.start_time, ae.end_time, ae.itsmid, ae.itsmstatus
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join automationengine ae on (a.pk_alert_id = CAST( ae.alertid as BIGINT))
+where
+        a.fk_status_id = s.pk_ea_status_id and
+        e.fk_status_id = s.pk_ea_status_id and
+        a.pk_alert_id = ea.fk_alert_id and
+        e.pk_event_id = ea.fk_event_id and """ + sFilterQuery + """ and a.pk_alert_id in(""" + sPaging + """)
+order by """ + sSortQuery
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                #s.stat_description = '""" + pStatus + """'
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResultAs2DList(sQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    lModAsStr = [list(map(str, i)) for i in dRet['data']]
+                    setUniqueAlert = set([i[0] for i in lModAsStr[1:]])
+                    #print(setUniqueAlert)
+                    lPack = [dict(zip(lModAsStr[0], i)) for i in lModAsStr[1:]]
+                    lAllAlert = []
+                    for eachA in setUniqueAlert:
+                        lOneAlert, dOneAlert = [], {}
+                        for eachD in lPack:
+                            if eachD["alertid"] == eachA:
+                                lOneAlert.append(deepcopy(eachD))#
+                        dOneAlert["alertid"] = eachA
+                        dOneAlert["aci_name"] = lOneAlert[0]["aci_name"]
+                        dOneAlert["acomponent"] = lOneAlert[0]["acomponent"]
+                        dOneAlert["adescription"] = lOneAlert[0]["adescription"]
+                        dOneAlert["anotes"] = lOneAlert[0]["anotes"]
+                        dOneAlert["aseverity"] = lOneAlert[0]["aseverity"]
+                        dOneAlert["alert_created_time"] = lOneAlert[0]["alert_created_time"]
+                        dOneAlert["asource"] = lOneAlert[0]["asource"]
+                        dOneAlert["astatus"] = lOneAlert[0]["astatus"]
+                        dOneAlert["automationid"] = lOneAlert[0]["automationid"]
+                        dOneAlert["automationstatus"] = lOneAlert[0]["automationstatus"]
+                        dOneAlert["start_time"] = lOneAlert[0]["start_time"]
+                        dOneAlert["end_time"] = lOneAlert[0]["end_time"]
+                        dOneAlert["itsmid"] = lOneAlert[0]["itsmid"]
+                        dOneAlert["itsmstatus"] = lOneAlert[0]["itsmstatus"]
+                        lTmp = [i.pop(j) for i in lOneAlert for j in ["alertid", "aci_name", "acomponent", "adescription", "anotes", "aseverity", "alert_created_time", "asource", "astatus", "automationid", "automationstatus", "start_time", "end_time", "itsmid", "itsmstatus"]]
+                        dOneAlert["associated_events"] = sorted(lOneAlert, key=lambda k: k['eventid'],reverse=adColSort)
+                        #print(dOneAlert)
+                        lAllAlert.append(dOneAlert)
+                    #lAllAlertDesc = sorted(lAllAlert, key=lambda k: k['alertid'], reverse=True)
+                    lAllAlertDesc = sorted(lAllAlert, key=lambda k: k[sSortQuery], reverse=adColSort)
+                    return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": dRetCnt["data"][0]["total"]}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load alert details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getEventsBasedOnStatusFilterOrderBy1(pStatus, from_offset, count_limit, filter_key, filter_value, column_sort):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sFilterQuery, sSortQuery = "", ""
+
+                # Applying Filter on colums = Basic Search
+                if filter_key == "event_id":
+                    sFilterQuery += " concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "alert_id":
+                    sFilterQuery += " concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "ciname":
+                    sFilterQuery += " lower(e.ci_name) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "component":
+                    sFilterQuery += " lower(e.component) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "datetime":
+                    sFilterQuery += " to_date(TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {0}, 'DD/MM/YYYY'), 'DD/MM/YYYY') >= to_date('" + \
+                                    filter_value.split("__")[0].replace("_",
+                                                                        "/") + "', 'DD/MM/YYYY') and to_date(TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY'), 'DD/MM/YYYY') <= to_date('" + \
+                                    filter_value.split("__")[1].replace("_", "/") + "', 'DD/MM/YYYY') and ".format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                elif filter_key == "severity":
+                    sFilterQuery += " lower(e.severity) ='" + filter_value.lower() + "' and "
+                elif filter_key == "source":
+                    sFilterQuery += " lower(e.source) = '" + filter_value.lower() + "' and "
+                elif filter_key == "null":
+                    sFilterQuery += " 1=1 and "
+                sFilterQuery = sFilterQuery[:-4]
+
+                # Applying sorting = ASC and DESC
+                adCol = column_sort[:-2]
+                adColSort = "asc" if column_sort[-1] == "a" else "desc"
+                if column_sort == "null":
+                    sSortQuery += " e.pk_event_id desc"
+                else:
+                    if adCol == "event_id":
+                        sSortQuery += " e.pk_event_id " + adColSort
+                    elif adCol == "alert_id":
+                        sSortQuery += " a.pk_alert_id " + adColSort
+                    elif adCol == "ciname":
+                        sSortQuery += " e.ci_name " + adColSort
+                    elif adCol == "component":
+                        sSortQuery += " e.component " + adColSort
+                    elif adCol == "datetime":
+                        sSortQuery += " TO_TIMESTAMP(e.event_created_time ) " + adColSort
+                    elif adCol == "severity":
+                        sSortQuery += " e.severity " + adColSort
+                    elif adCol == "source":
+                        sSortQuery += " e.source " + adColSort
+
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from event_data where " + sStatusCond
+                sPaging = "select pk_event_id from event_data where " + sStatusCond + " order by pk_event_id desc limit " + count_limit + " offset " + from_offset
+                sQuery = """select
+	concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, e.ci_name, e.component, e.description, e.notes, e.severity, TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status
+from
+	event_data e, alert_data a, ea_status s, event_alert_mapping ea
+where
+	a.fk_status_id = s.pk_ea_status_id and
+	e.fk_status_id = s.pk_ea_status_id and
+	a.pk_alert_id = ea.fk_alert_id and
+	e.pk_event_id = ea.fk_event_id and """ + sFilterQuery + """ and e.pk_event_id in(""" + sPaging + """)
+order by """ + sSortQuery
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'")
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    return json.dumps({"result": "success", "data": {"event": dRet["data"], "count": dRetCnt["data"][0]["total"]}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load event details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+
+#-----------------------------------------------------------------------------------------------------------------------------------------------------
+
+def getAlertsBasedOnStatusFilterOrderBy(pStatus, from_offset, count_limit, filter_key, filter_value, column_sort):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sFilterQuery, sSortQuery = "", ""
+
+                #Applying Filter on colums = Basic Search
+                if filter_key == "alert_id":
+                    sFilterQuery += " lower(concat('AL',lpad(cast(a.pk_alert_id as text),13,'0'))) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "ciname":
+                    sFilterQuery += " lower(a.ci_name) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "component":
+                    sFilterQuery += " lower(a.component) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "datetime":
+                    sFilterQuery += " to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY'), 'DD/MM/YYYY') >= to_date('" + \
+                                       filter_value.split("__")[0].replace("_",
+                                                                                 "/") + "', 'MM/DD/YYYY') and to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {1}, 'DD/MM/YYYY'), 'DD/MM/YYYY') <= to_date('" + \
+                                       filter_value.split("__")[1].replace("_", "/") + "', 'MM/DD/YYYY') and ".format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                elif filter_key == "botname":
+                    sFilterQuery += " lower(abr.bot_name) like '%" + \
+                                       filter_value.lower() + "%' and "
+                elif filter_key == "ticketid":
+                    sFilterQuery += " atd.ticket_no = '" + filter_value.lower() + "' and "
+                elif filter_key == "null":
+                    sFilterQuery += " 1=1 and "
+                sFilterQuery = sFilterQuery[:-4]
+
+                #Applying sort
+                adCol = column_sort[:-2]
+                adColSort = "asc" if column_sort[-1] == "a" else "desc"
+                bColSort = False if column_sort[-1] == "a" else True
+                if column_sort == "null":
+                    sSortQuery = "alertid"
+                else:
+                    if adCol == "alert_id":
+                        sSortQuery = "alertid"
+                    elif adCol == "ciname":
+                        sSortQuery = "aci_name"
+                    elif adCol == "component":
+                        sSortQuery = "acomponent"
+                    elif adCol == "datetime":
+                        sSortQuery = "alertid"
+                    elif adCol == "botname":
+                        sSortQuery = "automationid"
+                    elif adCol == "ticketid":
+                        sSortQuery = "itsmid"
+
+                sSortQueryWOAlias = {"alertid": "a.pk_alert_id", "aci_name": "a.ci_name", "acomponent": "a.component", "automationid": "abr.bot_name", "itsmid": "atd.ticket_no"}
+
+                #Applying Filter based on status
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("a.fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from alert_data a where " + sStatusCond
+
+                sQuery = """
+select 
+    a.pk_alert_id as alertid      
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join ai_automation_executions ae on (a.pk_alert_id = CAST( ae.fk_alert_id as BIGINT)) 
+		  left join ai_bot_repo abr on (ae.fk_bot_id = abr.pk_bot_id) left join ai_ticket_details atd on (a.pk_alert_id = atd.fk_alert_id) 
+where
+        a.fk_status_id = s.pk_ea_status_id and 
+        e.fk_status_id = s.pk_ea_status_id and 
+        a.pk_alert_id = ea.fk_alert_id and 
+        e.pk_event_id = ea.fk_event_id and """ + sStatusCond + """ and """ + sFilterQuery + """  
+order by """ + sSortQueryWOAlias[sSortQuery] + """ """ + adColSort
+
+                # Get Alerts because alerts gets missed out on doing query
+                sPaging = " limit " + count_limit + " offset " + from_offset
+                sQueryAlertAssociationIssue = "select alertid from (" + sQuery + ") a " #+ sPaging
+
+                dDistinctValues = ConnPostgreSQL.returnSelectQueryResultAsList(sQueryAlertAssociationIssue)
+                if dDistinctValues["result"] == "failure":
+                    return json.dumps(dDistinctValues)
+                lOutDV = dDistinctValues["data"]["alertid"]
+                lDistinctValues = []
+                for eachID in lOutDV:
+                    if lDistinctValues.__contains__(eachID):
+                        continue
+                    else:
+                        lDistinctValues.append(eachID)
+                sDistinctValuesData = ",".join([str(i) for i in lDistinctValues][int(from_offset):(int(from_offset)+int(count_limit))])
+
+                #So, the main query will be like
+                sMainQuery = """
+select 
+        concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, a.ci_name as aci_name, a.component as acomponent, a.description as adescription, a.notes as anotes, a.severity as aseverity,TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS')  as alert_created_time, a.source as asource, s.stat_description as astatus,
+        concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, e.ci_name,e.component, e.description, e.notes, e.severity,TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status,
+        COALESCE(abr.bot_name, '') as automationid, COALESCE(atd.ticket_no,'')	as itsmid
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join ai_automation_executions ae on (a.pk_alert_id = CAST( ae.fk_alert_id as BIGINT)) 
+		  left join ai_bot_repo abr on (ae.fk_bot_id = abr.pk_bot_id) left join ai_ticket_details atd on (a.pk_alert_id = atd.fk_alert_id) 
+where
+        a.fk_status_id = s.pk_ea_status_id and
+        e.fk_status_id = s.pk_ea_status_id and
+        a.pk_alert_id = ea.fk_alert_id and
+        e.pk_event_id = ea.fk_event_id and a.pk_alert_id in(""" + sDistinctValuesData + """)   
+order by """ + sSortQuery + """ """ + adColSort
+                sMainQuery = sMainQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                print(sMainQuery)
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResultAs2DList(sMainQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    lModAsStr = [list(map(str, i)) for i in dRet['data']]
+                    setUniqueAlert = set([i[0] for i in lModAsStr[1:]])
+                    #print(setUniqueAlert)
+                    lPack = [dict(zip(lModAsStr[0], i)) for i in lModAsStr[1:]]
+                    lAllAlert = []
+                    for eachA in setUniqueAlert:
+                        print(eachA)
+                        lOneAlert, dOneAlert = [], {}
+                        for eachD in lPack:
+                            if eachD["alertid"] == eachA:
+                                lOneAlert.append(deepcopy(eachD))#
+                        dOneAlert["alertid"] = eachA
+                        dOneAlert["aci_name"] = lOneAlert[0]["aci_name"]
+                        dOneAlert["acomponent"] = lOneAlert[0]["acomponent"]
+                        dOneAlert["adescription"] = lOneAlert[0]["adescription"]
+                        dOneAlert["anotes"] = lOneAlert[0]["anotes"]
+                        dOneAlert["aseverity"] = lOneAlert[0]["aseverity"]
+                        dOneAlert["alert_created_time"] = lOneAlert[0]["alert_created_time"]
+                        dOneAlert["asource"] = lOneAlert[0]["asource"]
+                        dOneAlert["astatus"] = lOneAlert[0]["astatus"]
+                        dOneAlert["automationid"] = lOneAlert[0]["automationid"]
+                        #dOneAlert["automationstatus"] = lOneAlert[0]["automationstatus"]
+                        #dOneAlert["start_time"] = lOneAlert[0]["start_time"]
+                        #dOneAlert["end_time"] = lOneAlert[0]["end_time"]
+                        dOneAlert["itsmid"] = lOneAlert[0]["itsmid"]
+                        #dOneAlert["itsmstatus"] = lOneAlert[0]["itsmstatus"]
+                        lTmp = [i.pop(j) for i in lOneAlert for j in ["alertid", "aci_name", "acomponent", "adescription", "anotes", "aseverity", "alert_created_time", "asource", "astatus", "automationid", "itsmid"]]
+                        dOneAlert["associated_events"] = sorted(lOneAlert, key=lambda k: k['eventid'],reverse=True)
+                        #print(dOneAlert)
+                        lAllAlert.append(dOneAlert)
+                        #print(eachA)
+                    #lAllAlertDesc = sorted(lAllAlert, key=lambda k: k['alertid'], reverse=True)
+                    lAllAlertDesc = sorted(lAllAlert, key=lambda k: k[sSortQuery], reverse=bColSort)
+                    #return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": dRetCnt["data"][0]["total"]}})
+                    return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": len(lDistinctValues)}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load alert details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getAlertsBasedOnStatusFilterOrderByLatest(pStatus, from_offset, count_limit, filter_key, filter_value, column_sort):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sFilterQuery, sSortQuery = "", ""
+
+                #Applying Filter on colums = Basic Search
+                if filter_key == "alert_id":
+                    sFilterQuery += " lower(concat('AL',lpad(cast(a.pk_alert_id as text),13,'0'))) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "ciname":
+                    sFilterQuery += " lower(a.ci_name) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "component":
+                    sFilterQuery += " lower(a.component) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "datetime":
+                    sFilterQuery += " to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY'), 'DD/MM/YYYY') >= to_date('" + \
+                                       filter_value.split("__")[0].replace("_",
+                                                                                 "/") + "', 'DD/MM/YYYY') and to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {1}, 'DD/MM/YYYY'), 'DD/MM/YYYY') <= to_date('" + \
+                                       filter_value.split("__")[1].replace("_", "/") + "', 'DD/MM/YYYY') and ".format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                elif filter_key == "autoid":
+                    sFilterQuery += " (CASE when ae.automationid is not null then concat('A',lpad(cast(ae.automationid as text),14,'0')) else null END) like '%" + \
+                                       filter_value.lower() + "%' and "
+                elif filter_key == "ticketid":
+                    sFilterQuery += " ae.itsmid = '" + filter_value.lower() + "' and "
+                elif filter_key == "null":
+                    sFilterQuery += " 1=1 and "
+                sFilterQuery = sFilterQuery[:-4]
+
+                #Applying sort
+                adCol = column_sort[:-2]
+                adColSort = "asc" if column_sort[-1] == "a" else "desc"
+                bColSort = False if column_sort[-1] == "a" else True
+                if column_sort == "null":
+                    sSortQuery = "alertid"
+                else:
+                    if adCol == "alert_id":
+                        sSortQuery = "alertid"
+                    elif adCol == "ciname":
+                        sSortQuery = "aci_name"
+                    elif adCol == "component":
+                        sSortQuery = "acomponent"
+                    elif adCol == "datetime":
+                        sSortQuery = "alertid"
+                    elif adCol == "autoid":
+                        sSortQuery = "automationid"
+                    elif adCol == "ticketid":
+                        sSortQuery = "itsmid"
+
+                sSortQueryWOAlias = {"alertid": "a.pk_alert_id", "aci_name": "a.ci_name", "acomponent": "a.component", "automationid": "ae.automationid", "itsmid": "ae.itsmid"}
+
+                #Applying Filter based on status
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("a.fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from alert_data a where " + sStatusCond
+
+                sQuery = """
+select 
+    a.pk_alert_id as alertid      
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join automationengine ae on (a.pk_alert_id = CAST( ae.alertid as BIGINT))
+where
+        a.fk_status_id = s.pk_ea_status_id and
+        e.fk_status_id = s.pk_ea_status_id and
+        a.pk_alert_id = ea.fk_alert_id and
+        e.pk_event_id = ea.fk_event_id and """ + sStatusCond + """ and """ + sFilterQuery + """  
+order by """ + sSortQueryWOAlias[sSortQuery] + """ """ + adColSort
+
+                # Get Alerts because alerts gets missed out on doing query
+                sPaging = " limit " + count_limit + " offset " + from_offset
+                sQueryAlertAssociationIssue = "select alertid from (" + sQuery + ") a " #+ sPaging
+
+                dDistinctValues = ConnPostgreSQL.returnSelectQueryResultAsList(sQueryAlertAssociationIssue)
+                lOutDV = dDistinctValues["data"]["alertid"]
+                lDistinctValues = []
+                for eachID in lOutDV:
+                    if lDistinctValues.__contains__(eachID):
+                        continue
+                    else:
+                        lDistinctValues.append(eachID)
+                sDistinctValuesData = ",".join([str(i) for i in lDistinctValues][int(from_offset):(int(from_offset)+int(count_limit))])
+
+                #So, the main query will be like
+                sMainQuery = """
+select 
+        concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, a.ci_name as aci_name, a.component as acomponent, a.description as adescription, a.notes as anotes, a.severity as aseverity,TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS')  as alert_created_time, a.source as asource, s.stat_description as astatus,
+        concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, e.ci_name,e.component, e.description, e.notes, e.severity,TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status,
+        (CASE when ae.automationid is not null then concat('A',lpad(cast(ae.automationid as text),14,'0')) else null END) as automationid, ae.automationstatus,ae.start_time, ae.end_time, ae.itsmid, ae.itsmstatus
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join automationengine ae on (a.pk_alert_id = CAST( ae.alertid as BIGINT))
+where
+        a.fk_status_id = s.pk_ea_status_id and
+        e.fk_status_id = s.pk_ea_status_id and
+        a.pk_alert_id = ea.fk_alert_id and
+        e.pk_event_id = ea.fk_event_id and a.pk_alert_id in(""" + sDistinctValuesData + """)   
+order by """ + sSortQuery + """ """ + adColSort
+                sMainQuery = sMainQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                print(sMainQuery)
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResultAs2DList(sMainQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    lModAsStr = [list(map(str, i)) for i in dRet['data']]
+                    setUniqueAlert = set([i[0] for i in lModAsStr[1:]])
+                    #print(setUniqueAlert)
+                    lPack = [dict(zip(lModAsStr[0], i)) for i in lModAsStr[1:]]
+                    lAllAlert = []
+                    for eachA in setUniqueAlert:
+                        print(eachA)
+                        lOneAlert, dOneAlert = [], {}
+                        for eachD in lPack:
+                            if eachD["alertid"] == eachA:
+                                lOneAlert.append(deepcopy(eachD))#
+                        dOneAlert["alertid"] = eachA
+                        dOneAlert["aci_name"] = lOneAlert[0]["aci_name"]
+                        dOneAlert["acomponent"] = lOneAlert[0]["acomponent"]
+                        dOneAlert["adescription"] = lOneAlert[0]["adescription"]
+                        dOneAlert["anotes"] = lOneAlert[0]["anotes"]
+                        dOneAlert["aseverity"] = lOneAlert[0]["aseverity"]
+                        dOneAlert["alert_created_time"] = lOneAlert[0]["alert_created_time"]
+                        dOneAlert["asource"] = lOneAlert[0]["asource"]
+                        dOneAlert["astatus"] = lOneAlert[0]["astatus"]
+                        dOneAlert["automationid"] = lOneAlert[0]["automationid"]
+                        dOneAlert["automationstatus"] = lOneAlert[0]["automationstatus"]
+                        dOneAlert["start_time"] = lOneAlert[0]["start_time"]
+                        dOneAlert["end_time"] = lOneAlert[0]["end_time"]
+                        dOneAlert["itsmid"] = lOneAlert[0]["itsmid"]
+                        dOneAlert["itsmstatus"] = lOneAlert[0]["itsmstatus"]
+                        lTmp = [i.pop(j) for i in lOneAlert for j in ["alertid", "aci_name", "acomponent", "adescription", "anotes", "aseverity", "alert_created_time", "asource", "astatus", "automationid", "automationstatus", "start_time", "end_time", "itsmid", "itsmstatus"]]
+                        dOneAlert["associated_events"] = sorted(lOneAlert, key=lambda k: k['eventid'],reverse=True)
+                        #print(dOneAlert)
+                        lAllAlert.append(dOneAlert)
+                        #print(eachA)
+                    #lAllAlertDesc = sorted(lAllAlert, key=lambda k: k['alertid'], reverse=True)
+                    lAllAlertDesc = sorted(lAllAlert, key=lambda k: k[sSortQuery], reverse=bColSort)
+                    #return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": dRetCnt["data"][0]["total"]}})
+                    return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": len(lDistinctValues)}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load alert details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getEventsBasedOnStatusFilterOrderBy(pStatus, from_offset, count_limit, filter_key, filter_value, column_sort):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sFilterQuery, sSortQuery = "", ""
+
+                # Applying Filter on colums = Basic Search
+                if filter_key == "event_id":
+                    sFilterQuery += " lower(concat('EV',lpad(cast(e.pk_event_id as text),13,'0'))) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "alert_id":
+                    sFilterQuery += " lower(concat('AL',lpad(cast(a.pk_alert_id as text),13,'0'))) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "ciname":
+                    sFilterQuery += " lower(e.ci_name) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "component":
+                    sFilterQuery += " lower(e.component) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "datetime":
+                    sFilterQuery += " to_date(TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {0}, 'DD/MM/YYYY'), 'DD/MM/YYYY') >= to_date('" + \
+                                    filter_value.split("__")[0].replace("_",
+                                                                        "/") + "', 'MM/DD/YYYY') and to_date(TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY'), 'DD/MM/YYYY') <= to_date('" + \
+                                    filter_value.split("__")[1].replace("_", "/") + "', 'MM/DD/YYYY') and ".format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                elif filter_key == "severity":
+                    sFilterQuery += " lower(e.severity) ='" + filter_value.lower() + "' and "
+                elif filter_key == "source":
+                    sFilterQuery += " lower(e.source) = '" + filter_value.lower() + "' and "
+                elif filter_key == "null":
+                    sFilterQuery += " 1=1 and "
+                sFilterQuery = sFilterQuery[:-4]
+
+                # Applying sorting = ASC and DESC
+                adCol = column_sort[:-2]
+                adColSort = "asc" if column_sort[-1] == "a" else "desc"
+                if column_sort == "null":
+                    sSortQuery += " e.pk_event_id desc"
+                else:
+                    if adCol == "event_id":
+                        sSortQuery += " e.pk_event_id " + adColSort
+                    elif adCol == "alert_id":
+                        sSortQuery += " a.pk_alert_id " + adColSort
+                    elif adCol == "ciname":
+                        sSortQuery += " e.ci_name " + adColSort
+                    elif adCol == "component":
+                        sSortQuery += " e.component " + adColSort
+                    elif adCol == "datetime":
+                        sSortQuery += " TO_TIMESTAMP(e.event_created_time ) " + adColSort
+                    elif adCol == "severity":
+                        sSortQuery += " e.severity " + adColSort
+                    elif adCol == "source":
+                        sSortQuery += " e.source " + adColSort
+
+                #Get Count
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("e.fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from event_data e where " + sStatusCond
+
+                sQuery = """
+select 
+    e.pk_event_id as EventID   
+from 
+	event_data e, alert_data a, ea_status s, event_alert_mapping ea 
+where 
+	a.fk_status_id = s.pk_ea_status_id and 
+	e.fk_status_id = s.pk_ea_status_id and 
+	a.pk_alert_id = ea.fk_alert_id and 
+	e.pk_event_id = ea.fk_event_id and """ + sStatusCond + """ and """ + sFilterQuery + """ 
+order by """ + sSortQuery
+
+                #Count
+                dDistinctValues = ConnPostgreSQL.returnSelectQueryResultAsList(sQuery)
+
+                # Get Alerts because alerts gets missed out on doing query
+                sPaging = " limit " + count_limit + " offset " + from_offset
+                sQueryAlertAssociationIssue = "select eventid from (" + sQuery + ") e " + sPaging
+
+                #Main Query
+                sMainQuery = """ 
+select 
+    concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, e.ci_name, e.component, e.description, e.notes, e.severity, TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status  
+from 
+    event_data e, alert_data a, ea_status s, event_alert_mapping ea  
+where 
+    a.fk_status_id = s.pk_ea_status_id and 
+    e.fk_status_id = s.pk_ea_status_id and 
+    a.pk_alert_id = ea.fk_alert_id and 
+    e.pk_event_id = ea.fk_event_id and e.pk_event_id in(""" + sQueryAlertAssociationIssue + """)  
+order by """ + sSortQuery
+                sMainQuery = sMainQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'")
+
+                print(sMainQuery)
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResult(sMainQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    #return json.dumps({"result": "success", "data": {"event": dRet["data"], "count": dRetCnt["data"][0]["total"]}})
+                    return json.dumps({"result": "success", "data": {"event": dRet["data"], "count": len(dDistinctValues["data"]["eventid"])}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load event details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getDroppedEvents(from_offset, count_limit):
+    """Method: Get all dropped events"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sCountQuery = "select count(*) as count from dropped_event where promote_yn='N'"
+                sPaging = " limit " + count_limit + " offset " + from_offset
+                sQuery = """
+select 
+	concat('D',lpad(cast(d.pk_dropped_event_id as text),13,'0')) as DroppedEventID, COALESCE(d.ci_name,'') as ci_name, COALESCE(d.component,'') as component, d.description, d.notes, d.severity, TO_CHAR(TO_TIMESTAMP(d.event_created_time) {0}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time , d.source, s.stat_description as status, d.promote_yn as promote_flag 
+from 
+	dropped_event d, ea_status s  
+where 
+	d.fk_status_id = s.pk_ea_status_id and d.promote_yn='N' 
+order by 
+    event_created_time desc """ + sPaging
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'")
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                #dRet = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResultGroupBy(sQuery, ["ci_name", "component"])
+                if dRet["result"] == "success":
+                    return json.dumps({"result": "success", "data": {"dropped_events" : dRet["data"], "count": dRetCnt["data"][0]["count"]}})
+                else:
+                    return json.dumps(dRet)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def promoteDroppedEvents(dPayload):
+    """Methods is used to Promote the Dropped Events
+payload: {
+	"affected_events": "D0000000000001,D0000000000002,D0000000000003",
+	"ci_name": "bkp-02",
+	"component": "Memory1",
+	"description": "CPU utilization is high",
+	"notes": "CPU utilization is Critical. Used : 96%",
+	"severity": "critical"
+} """
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                lAttr = ["affected_events", "ci_name", "component", "description", "notes", "severity"]
+                lPayErr = [1 if i in lAttr else 0 for i in dPayload.keys()]
+                lPayValuesErr = [1 if (not i.strip() == "") else 0 for i in dPayload.values()]
+                if not ((0 in lPayErr) and (0 in lPayValuesErr)):
+                    lAffectedDroppedEvents = dPayload["affected_events"].split(",")
+                    sCIName = dPayload["ci_name"]
+                    sComponent = dPayload["component"]
+                    sDescription = dPayload["description"]
+                    sNotes = dPayload["notes"]
+                    sSeverity = dPayload["severity"]
+                    sDEventsQuery = "select pk_dropped_event_id, ci_name, component, description, notes, severity, event_created_time, source from dropped_event where pk_dropped_event_id in(" + ",".join([i.strip('D').strip('0') for i in lAffectedDroppedEvents]) + ")"
+                    dRet = ConnPostgreSQL.returnSelectQueryResult(sDEventsQuery)
+                    if dRet["result"] == "success":
+                        #configure payload to post to receiver
+                        lPOSTOnReceiver, iInit = [], 0
+                        for i in dRet["data"]:
+                            d = {}
+                            d["dropped_event_id"] = str(i["pk_dropped_event_id"])
+                            d["ci_name"] = sCIName
+                            d["component"] = sComponent
+                            if iInit == 0:
+                                d["description"] = sDescription
+                                d["notes"] = sNotes
+                                d["severity"] = sSeverity
+                            else:
+                                d["description"] = i["description"]
+                                d["notes"] = i["notes"]
+                                d["severity"] = i["severity"]
+                            d["event_created_time"] = str(i["event_created_time"])
+                            d["source"] = i["source"]
+                            lPOSTOnReceiver.append(d)
+                            iInit = 1
+                        #POST it to receiver
+                        sQuery = "select configip as ip, configport as port from configuration where configname='RECEIVER'"
+                        dRetIP = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+                        if dRetIP["result"] == "success":
+                            sIPAddress = dRetIP["data"][0]["ip"]
+                            sPort = str(dRetIP["data"][0]["port"])
+                            sURL = "http://" + sIPAddress + ":" + sPort + "/evm/api1.0/endpoints/eventreceiver"
+                            sHeader = {'Content-Type': 'application/json'}
+                            dResult = {"success_republish": 0, "failure_republish": 0, "success_flagupdate": 0, "failure_flagupdate": 0}
+                            for eachPOST in lPOSTOnReceiver:
+                                retDetails = restcall.post(url=sURL, json=eachPOST, headers=sHeader)
+                                if retDetails.status_code == 200:
+                                    dResult["success_republish"] += 1
+                                    #Update Promote Flag
+                                    sPQuery = "update dropped_event set promote_yn='Y' where pk_dropped_event_id=" + str(eachPOST["dropped_event_id"])
+                                    dRetPF = ConnPostgreSQL.returnInsertResult(sPQuery)
+                                    if dRetPF["result"] == "success":
+                                        dResult["success_flagupdate"] += 1
+                                    else:
+                                        dResult["failure_flagupdate"] += 1
+                                else:
+                                    dResult["failure_republish"] += 1
+                            return json.dumps({"result": "success", "data": dResult})
+                        else:
+                            return json.dumps({"result": "failure", "data": "Receiver Configuration is missing in Database"})
+                    else:
+                        return json.dumps({"result": "failure", "data": "No such Dropped Events available to Promote"})
+                else:
+                    return json.dumps({"result": "failure", "data": "Either the key or value is missing in the Payload"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getAutomationExecutionStageWithAlertID(sAlertID):
+    """Methods is used to get the execution stage of BOT"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sQuery = """
+select 
+	COALESCE(cast(a.pk_alert_id as varchar),'') as alert_id, COALESCE(a.starttime,'') as starttime, COALESCE(a.endtime,'') as endtime, COALESCE(a.status,'GREY') as status, COALESCE(s.stages,'') as stages , COALESCE(a.output,'') as output 
+from 
+	ai_automation_stages s left join 
+	(select
+		a.pk_alert_id, TO_CHAR(TO_TIMESTAMP(aeh.starttime) {0}, 'DD/MM/YYYY HH24:MI:SS') starttime, TO_CHAR(TO_TIMESTAMP(aeh.endtime) {1}, 'DD/MM/YYYY HH24:MI:SS') endtime, aeh.status, ast.stages, aeh.output 
+	from 
+		ai_automation_execution_history aeh, ai_automation_stages ast, alert_data a left join ai_automation_executions ae on(a.pk_alert_id = ae.fk_alert_id) 
+	where 
+		ae.pk_execution_id = aeh.fk_execution_id and 
+		aeh.fk_stage_id = ast.stageid and 
+		ae.pk_execution_id = (select pk_execution_id from ai_automation_executions where concat('AL',lpad(cast(fk_alert_id as text),13,'0')) = '""" + sAlertID + """' order by pk_execution_id desc offset 0 limit 1) and 
+		concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) = '""" + sAlertID + """' 
+	order by 
+		aeh.pk_history_id desc) a 
+	on (a.stages=s.stages)
+order by 
+	s.stageid asc"""
+                sQuery = sQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                dRet = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+                if dRet["result"] == "success":
+                    lModifiedDicts = []
+                    for eachDict in dRet["data"]:
+                        if eachDict["stages"].upper() == "EXECUTE BOTS / RULES":
+                            if eachDict["output"].strip() != "":
+                                eachDict["output"] = decode('auto!ntell!', eachDict["output"])
+                        lModifiedDicts.append(eachDict)
+                    dRet["data"] = lModifiedDicts
+                    return json.dumps(dRet)
+                else:
+                    return json.dumps({"result": "failure", "data": "Unable to fetch Automation Execution details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getAlertsBasedOnStatusFilterOrderBy4OneAlert(pStatus, from_offset, count_limit, filter_key, filter_value, column_sort):
+    """Method: get all the events availbale"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            sTimeZone = getTimeZone(request.headers["SESSIONKEY"])
+            if sTimeZone == "no data":
+                return json.dumps({"result": "failure", "data": "Failed fetching TimeZone details of logged in user"})
+            try:
+                sFilterQuery, sSortQuery = "", ""
+
+                #Applying Filter on colums = Basic Search
+                if filter_key == "alert_id":
+                    sFilterQuery += " lower(concat('AL',lpad(cast(a.pk_alert_id as text),13,'0'))) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "ciname":
+                    sFilterQuery += " lower(a.ci_name) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "component":
+                    sFilterQuery += " lower(a.component) like '%" + filter_value.lower() + "%' and "
+                elif filter_key == "datetime":
+                    sFilterQuery += " to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY'), 'DD/MM/YYYY') >= to_date('" + \
+                                       filter_value.split("__")[0].replace("_",
+                                                                                 "/") + "', 'MM/DD/YYYY') and to_date(TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {1}, 'DD/MM/YYYY'), 'DD/MM/YYYY') <= to_date('" + \
+                                       filter_value.split("__")[1].replace("_", "/") + "', 'MM/DD/YYYY') and ".format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                elif filter_key == "botname":
+                    sFilterQuery += " lower(abr.bot_name) like '%" + \
+                                       filter_value.lower() + "%' and "
+                elif filter_key == "ticketid":
+                    sFilterQuery += " atd.ticket_no = '" + filter_value.lower() + "' and "
+                elif filter_key == "null":
+                    sFilterQuery += " 1=1 and "
+                sFilterQuery = sFilterQuery[:-4]
+
+                #Applying sort
+                adCol = column_sort[:-2]
+                adColSort = "asc" if column_sort[-1] == "a" else "desc"
+                bColSort = False if column_sort[-1] == "a" else True
+                if column_sort == "null":
+                    sSortQuery = "alertid"
+                else:
+                    if adCol == "alert_id":
+                        sSortQuery = "alertid"
+                    elif adCol == "ciname":
+                        sSortQuery = "aci_name"
+                    elif adCol == "component":
+                        sSortQuery = "acomponent"
+                    elif adCol == "datetime":
+                        sSortQuery = "alertid"
+                    elif adCol == "botname":
+                        sSortQuery = "automationid"
+                    elif adCol == "ticketid":
+                        sSortQuery = "itsmid"
+
+                sSortQueryWOAlias = {"alertid": "a.pk_alert_id", "aci_name": "a.ci_name", "acomponent": "a.component", "automationid": "abr.bot_name", "itsmid": "atd.ticket_no"}
+
+                #Applying Filter based on status
+                sStatusCond = "1=1" if pStatus.lower() == "all" else ("a.fk_status_id=(select pk_ea_status_id from ea_status where stat_description='" + pStatus + "')")
+                sCountQuery = "select count(*) as total from alert_data a where " + sStatusCond
+
+                sQuery = """
+select 
+    a.pk_alert_id as alertid      
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join ai_automation_executions ae on (a.pk_alert_id = CAST( ae.fk_alert_id as BIGINT)) 
+		  left join ai_bot_repo abr on (ae.fk_bot_id = abr.pk_bot_id) left join ai_ticket_details atd on (a.pk_alert_id = atd.fk_alert_id) 
+where
+        a.fk_status_id = s.pk_ea_status_id and 
+        e.fk_status_id = s.pk_ea_status_id and 
+        a.pk_alert_id = ea.fk_alert_id and 
+        e.pk_event_id = ea.fk_event_id and """ + sStatusCond + """ and """ + sFilterQuery + """  
+order by """ + sSortQueryWOAlias[sSortQuery] + """ """ + adColSort
+
+                # Get Alerts because alerts gets missed out on doing query
+                sPaging = " limit " + count_limit + " offset " + from_offset
+                sQueryAlertAssociationIssue = "select alertid from (" + sQuery + ") a " #+ sPaging
+
+                dDistinctValues = ConnPostgreSQL.returnSelectQueryResultAsList(sQueryAlertAssociationIssue)
+                if dDistinctValues["result"] == "failure":
+                    return json.dumps(dDistinctValues)
+                lOutDV = dDistinctValues["data"]["alertid"]
+                lDistinctValues = []
+                for eachID in lOutDV:
+                    if lDistinctValues.__contains__(eachID):
+                        continue
+                    else:
+                        lDistinctValues.append(eachID)
+                sDistinctValuesData = ",".join([str(i) for i in lDistinctValues][int(from_offset):(int(from_offset)+int(count_limit))])
+
+                #So, the main query will be like
+                sMainQuery = """
+select 
+        concat('AL',lpad(cast(a.pk_alert_id as text),13,'0')) as AlertID, a.ci_name as aci_name, a.component as acomponent, a.description as adescription, a.notes as anotes, a.severity as aseverity,TO_CHAR(TO_TIMESTAMP(a.event_created_time ) {0}, 'DD/MM/YYYY HH24:MI:SS')  as alert_created_time, a.source as asource, s.stat_description as astatus,
+        concat('EV',lpad(cast(e.pk_event_id as text),13,'0')) as EventID, e.ci_name,e.component, e.description, e.notes, e.severity,TO_CHAR(TO_TIMESTAMP(e.event_created_time ) {1}, 'DD/MM/YYYY HH24:MI:SS') as event_created_time, e.source, s.stat_description as status,
+        COALESCE(abr.bot_name, '') as automationid, COALESCE(atd.ticket_no,'')	as itsmid
+from
+         event_data e, ea_status s, event_alert_mapping ea, alert_data a left join ai_automation_executions ae on (a.pk_alert_id = CAST( ae.fk_alert_id as BIGINT)) 
+		  left join ai_bot_repo abr on (ae.fk_bot_id = abr.pk_bot_id) left join ai_ticket_details atd on (a.pk_alert_id = atd.fk_alert_id) 
+where
+        a.fk_status_id = s.pk_ea_status_id and
+        e.fk_status_id = s.pk_ea_status_id and
+        a.pk_alert_id = ea.fk_alert_id and
+        e.pk_event_id = ea.fk_event_id and a.pk_alert_id in(""" + sDistinctValuesData + """)   
+order by """ + sSortQuery + """ """ + adColSort
+                sMainQuery = sMainQuery.format("at time zone 'utc' at time zone '" + sTimeZone + "'", "at time zone 'utc' at time zone '" + sTimeZone + "'")
+                print(sMainQuery)
+                dRetCnt = ConnPostgreSQL.returnSelectQueryResult(sCountQuery)
+                dRet = ConnPostgreSQL.returnSelectQueryResultAs2DList(sMainQuery)
+                if dRet["result"] == "success" and dRetCnt["result"] == "success":
+                    lModAsStr = [list(map(str, i)) for i in dRet['data']]
+                    setUniqueAlert = set([i[0] for i in lModAsStr[1:]])
+                    #print(setUniqueAlert)
+                    lPack = [dict(zip(lModAsStr[0], i)) for i in lModAsStr[1:]]
+                    lAllAlert = []
+                    for eachA in setUniqueAlert:
+                        print(eachA)
+                        lOneAlert, dOneAlert = [], {}
+                        for eachD in lPack:
+                            if eachD["alertid"] == eachA:
+                                lOneAlert.append(deepcopy(eachD))#
+                        dOneAlert["alertid"] = eachA
+                        dOneAlert["aci_name"] = lOneAlert[0]["aci_name"]
+                        dOneAlert["acomponent"] = lOneAlert[0]["acomponent"]
+                        dOneAlert["adescription"] = lOneAlert[0]["adescription"]
+                        dOneAlert["anotes"] = lOneAlert[0]["anotes"]
+                        dOneAlert["aseverity"] = lOneAlert[0]["aseverity"]
+                        dOneAlert["alert_created_time"] = lOneAlert[0]["alert_created_time"]
+                        dOneAlert["asource"] = lOneAlert[0]["asource"]
+                        dOneAlert["astatus"] = lOneAlert[0]["astatus"]
+                        dOneAlert["automationid"] = lOneAlert[0]["automationid"]
+                        #dOneAlert["automationstatus"] = lOneAlert[0]["automationstatus"]
+                        #dOneAlert["start_time"] = lOneAlert[0]["start_time"]
+                        #dOneAlert["end_time"] = lOneAlert[0]["end_time"]
+                        dOneAlert["itsmid"] = lOneAlert[0]["itsmid"]
+                        #dOneAlert["itsmstatus"] = lOneAlert[0]["itsmstatus"]
+                        lTmp = [i.pop(j) for i in lOneAlert for j in ["alertid", "aci_name", "acomponent", "adescription", "anotes", "aseverity", "alert_created_time", "asource", "astatus", "automationid", "itsmid"]]
+                        dOneAlert["associated_events"] = sorted(lOneAlert, key=lambda k: k['eventid'],reverse=True)
+                        #print(dOneAlert)
+                        lAllAlert.append(dOneAlert)
+                        #print(eachA)
+                    #lAllAlertDesc = sorted(lAllAlert, key=lambda k: k['alertid'], reverse=True)
+                    lAllAlertDesc = sorted(lAllAlert, key=lambda k: k[sSortQuery], reverse=bColSort)
+                    #return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": dRetCnt["data"][0]["total"]}})
+                    return json.dumps({"result": "success", "data": {"alert": lAllAlertDesc, "count": len(lDistinctValues)}})
+                else:
+                    return json.dumps({"result": "failure", "data": "Failed to load alert details"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing

@@ -1,0 +1,46 @@
+---
+- name: Create a VM from a template -- Control Machine
+  hosts: localhost
+  gather_facts: no
+  vars:
+    vc_ip: "{{ vcenter_ipaddress }}"
+    vc_usr: "{{ vcenter_username }}"
+    vc_pwd: "{{ vcenter_password }}"
+    guest_ip: "{{ guest_ipaddress }}"
+    guest_host: "{{ guest_hostname }}"
+    guest_usr: "{{ guest_username }}"
+    guest_pwd: "{{ guest_password }}"
+    datacenter: "{{ datacenter }}"
+
+  tasks:
+
+  - name: copy network config file to VM
+    vmware_guest_file_operation:
+      hostname: "{{ vc_ip }}"
+      username: "{{ vc_usr }}"
+      password: "{{ vc_pwd }}"
+      datacenter: "{{ datacenter }}"
+      folder: "/"
+      validate_certs: no
+      vm_id: "{{ guest_host }}"
+      vm_username: "{{ guest_usr }}"
+      vm_password: "{{ guest_pwd }}"
+      copy:
+        src: "/opt/aiorch/wa_scripts/vmware/provision/windows/ConfigureRemotingForAnsible.ps1"
+        dest: "C:\\ConfigureRemotingForAnsible.ps1"
+        overwrite: True
+    delegate_to: localhost
+
+  - name: Run command inside the windows guest machine
+    vmware_vm_shell:
+      hostname: "{{ vc_ip }}"
+      username: "{{ vc_usr }}"
+      password: "{{ vc_pwd }}"
+      datacenter: "{{ datacenter }}"
+      folder: "/"
+      vm_id: "{{ guest_host }}"
+      vm_username: "{{ guest_usr }}"
+      vm_password: "{{ guest_pwd }}"
+      vm_shell: "C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe"
+      vm_shell_args: " C:\\ConfigureRemotingForAnsible.ps1"
+      validate_certs: no

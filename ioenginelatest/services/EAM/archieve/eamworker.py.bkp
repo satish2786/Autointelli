@@ -1,0 +1,306 @@
+#============================================================================================
+# Author        : Dinesh Balaraman
+# Created On    :
+# (c) Copyright by Autointelli Technologies
+#============================================================================================
+
+import json
+from services.utils import ConnPostgreSQL
+import services.utils.decoder as decoder
+
+def insertDroppedNotifications(pCIName, pComp, pDesc, pNotes, pSeverity, pCreatedTime, pSource, pStatus):
+    # Insert Event
+    sInsertDroppedEvents = "insert into dropped_event(ci_name, component, description, notes, severity, event_created_time, source, fk_status_id, promote_yn) " \
+                   "values('%s', '%s', '%s', '%s', '%s', %d, '%s', %d, '%s') RETURNING pk_dropped_event_id" % (
+                       pCIName, pComp, pDesc, pNotes, pSeverity, pCreatedTime, pSource, pStatus, 'N')
+    iRet = ConnPostgreSQL.returnSelectQueryResultWithCommit(sInsertDroppedEvents)
+    if iRet["result"] == "success":
+        # event inserted successfully
+        sEventID = iRet["data"][0]["pk_dropped_event_id"]
+        return {"result": "success", "data": sEventID}
+    elif iRet["result"] == "failure":
+        return iRet
+
+def insertEvent(pCIName, pComp, pDesc, pNotes, pSeverity, pCreatedTime, pSource, pStatus):
+    # Insert Event
+    sInsertEvent = "insert into event_data(ci_name, component, description, notes, severity, event_created_time, source, fk_status_id) " \
+                   "values('%s', '%s', '%s', '%s', '%s', %d, '%s', %d) RETURNING pk_event_id" % (
+                       pCIName, pComp, pDesc, pNotes, pSeverity, pCreatedTime, pSource, pStatus)
+    iRet = ConnPostgreSQL.returnSelectQueryResultWithCommit(sInsertEvent)
+    if iRet["result"] == "success":
+        # event inserted successfully
+        sEventID = iRet["data"][0]["pk_event_id"]
+        return {"result": "success", "data": sEventID}
+    elif iRet["result"] == "failure":
+        return {"result": "failure", "data": 0}
+
+def insertAlert(pCIName, pComp, pDesc, pNotes, pSeverity, pCreatedTime, pSource, pStatus):
+    # Insert Alert
+    sInsertAlert = "insert into alert_data(ci_name, component, description, notes, severity, event_created_time, source, fk_status_id) " \
+                   "values('%s', '%s', '%s', '%s', '%s', %d, '%s', %d) RETURNING pk_alert_id" % (
+                       pCIName, pComp, pDesc, pNotes, pSeverity, pCreatedTime, pSource, pStatus)
+    sRet = ConnPostgreSQL.returnSelectQueryResultWithCommit(sInsertAlert)
+    if sRet["result"] == "success":
+        # Alert inserted successfully
+        sAlertID = sRet["data"][0]["pk_alert_id"]
+        return {"result": "success", "data": sAlertID}
+    elif sRet["result"] == "failure":
+        return {"result": "failure", "data": 0}
+
+def insertEAMapping(pEventID, pAlertID):
+    # Insert into EA Mapping
+    iEAMap = "insert into event_alert_mapping(fk_event_id, fk_alert_id) values(%d,%d)" % (pEventID, pAlertID)
+    iRet = ConnPostgreSQL.returnInsertResult(iEAMap)
+    if iRet["result"] == "success":
+        return {"result": "success"}
+    else:
+        return {"result": "failure"}
+
+def insertDroppedEventMapping(pDroppedID, pEventID):
+    #Insert Event ID for the corresponding dropped event
+    iQuery = "update dropped_event set fk_event_id=" + str(pEventID) + " where pk_dropped_event_id=" + str(pDroppedID)
+    iRet = ConnPostgreSQL.returnInsertResult(iQuery)
+    if iRet["result"] == "success":
+        return {"result": "success"}
+    else:
+        return {"result": "failure"}
+
+def chkSuppression(pCI, pComp):
+    # check for any open event with same component and ci_name (suppression)
+    sChkSup = "select * from alert_data where lower(ci_name) = '" + pCI.lower().strip() + "' and lower(component) = '" + pComp.lower().strip() + "' and " \
+                "fk_status_id in(select pk_ea_status_id from ea_status where stat_description in('open', 'wip', 'pending'))"
+    sRetSup = ConnPostgreSQL.returnSelectQueryResult(sChkSup)
+    if sRetSup["result"] == "success":
+        if len(sRetSup["data"]) == 1:
+            return {"result": "success", "data": sRetSup["data"][0]["pk_alert_id"]}
+        else:
+            return {"result": "failure", "data": "multiple data"}
+    elif sRetSup["result"] == "failure":
+        return sRetSup
+
+def updateAlert(pAlertID, pSeverity):
+    "Handle Clear Event : Close Event and Alert if Severity if 'OK' & Update Alert's Severity if 'other than OK'"
+    if pSeverity.lower() == "ok":
+        iAlQuery = "update alert_data set fk_status_id=(select pk_ea_status_id from ea_status where active_yn='Y' and stat_description='closed'),severity='OK' where pk_alert_id = " + str(pAlertID)
+        iEvQuery = "update event_data set fk_status_id=(select pk_ea_status_id from ea_status where active_yn='Y' and stat_description='closed') where pk_event_id in(select fk_event_id from  event_alert_mapping where fk_alert_id=" + str(pAlertID) + ")"
+        iRetA = ConnPostgreSQL.returnInsertResult(iAlQuery)
+        iRetE = ConnPostgreSQL.returnInsertResult(iEvQuery)
+        if iRetA["result"] == "success" and iRetE["result"] == "success":
+            return {"result": "success"}
+        else:
+            return {"result": "failure"}
+    else:
+        iAlQuery = "update alert_data set severity='" + pSeverity + "' where pk_alert_id = " + str(pAlertID)
+        iRetA = ConnPostgreSQL.returnInsertResult(iAlQuery)
+        if iRetA["result"] == "success":
+            return {"result": "success"}
+        else:
+            return {"result": "failure"}
+
+def processEvent(payload):
+    """Method: accepts the the event from external monitoring system"""
+    try:
+        dPayload, droppedID = payload, 0
+        # Remove if we find any dropped event id
+        if "dropped_event_id" in dPayload.keys():
+            droppedID = dPayload.pop("dropped_event_id")
+
+        dComponent = {'component_value': dPayload['component_value']}
+        del dPayload['component_value']
+
+        lAttr = ["ci_name", "component", "description", "notes", "severity", "event_created_time", "source"]
+        lPayErr = [1 if i in lAttr else 0 for i in dPayload.keys()]
+        lPayValuesErr = [1 if (not i.strip() == "") else 0 for i in dPayload.values()]
+
+        dPayload.update(dComponent)
+
+        #Dropped Events capturing
+        if (0 in lPayValuesErr) and (not 0 in lPayErr):
+            sStatus = 1
+            dRet = ConnPostgreSQL.returnSelectQueryResult("select pk_ea_status_id as status_id from ea_status where stat_description='open'")
+            if dRet["result"] == "success":
+                sStatus = dRet["data"][0]["status_id"]
+            sCIName = dPayload["ci_name"]
+            sComp = dPayload["component"]
+            sDesc = dPayload["description"]
+            sNotes = dPayload["notes"]
+            sSeverity = dPayload["severity"]
+            sCreatedTime = float(dPayload["event_created_time"])
+            sSource = dPayload["source"]
+            dRet = insertDroppedNotifications(sCIName, sComp, sDesc, sNotes, sSeverity, sCreatedTime, sSource, sStatus)
+            if dRet["result"] == "success":
+                return {"result": "success", "data": "Dropped event created"}
+            else:
+                return {"result": "success", "data": "Dropped event creation failed"}
+        else:
+            #Future development
+            pass
+
+        # check for payload is valid or not
+        if not 0 in lPayErr:
+            sStatus = 1
+            dRet = ConnPostgreSQL.returnSelectQueryResult("select pk_ea_status_id as status_id from ea_status where stat_description='open'")
+            if dRet["result"] == "success":
+                print(dRet["data"])
+                sStatus = dRet["data"][0]["status_id"]
+            sCIName = dPayload["ci_name"]
+            sComp = dPayload["component"]
+            sDesc = dPayload["description"]
+            sNotes = dPayload["notes"]
+            sSeverity = dPayload["severity"]
+            sCreatedTime = float(dPayload["event_created_time"])
+            sSource = dPayload["source"]
+
+            # check for any open event with same component and ci_name (suppression)
+            iAlertSupp, bSupp = 0, False
+            dChkSupp = chkSuppression(sCIName, sComp)
+            if dChkSupp["result"] == "success":
+                iAlertSupp = dChkSupp["data"]
+                bSupp = True
+            else:
+                bSupp = False
+            print(bSupp)
+            if bSupp:
+                # Insert event into event and map with the existing alert : Suppression
+                try:
+                    iEventID, iAlertID = 0, iAlertSupp
+                    print(type(iAlertID))
+
+                    # Insert Event
+                    dRetInsEve = insertEvent(sCIName, sComp, sDesc, sNotes, sSeverity, sCreatedTime, sSource, sStatus)
+                    if dRetInsEve["result"] == "success":
+                        iEventID = dRetInsEve["data"]
+
+                        # Insert into EA Mapping
+                        dRetInsMap = insertEAMapping(iEventID, iAlertID)
+                        if dRetInsMap["result"] == "success":
+                            # Push data to websocket
+                            #
+
+                            # Handle Clear Event : Close Event and Alert if Severity if 'OK' & Update Alert's Severity if 'other than OK'
+                            dUpdateRet = updateAlert(iAlertID, sSeverity)
+                            if dUpdateRet["result"] == "success":
+
+                                #Store mapping between dropped event and event
+                                if droppedID != 0:
+                                    dRet = insertDroppedEventMapping(droppedID, iEventID)
+                                    if dRet["result"] == "success":
+                                        return {"result": "success", "data": "Alert Promoted, Suppressed and mapped"}
+                                    else:
+                                        return {"result": "success", "data": "Alert Promoted, Supressed and failed to map"}
+
+                                return {"result": "success", "data": "Alert suppressed"}
+                except Exception as e:
+                    # Roll back code
+                    print(str(e))
+                    return {"result": "failure", "data": str(e)}
+
+            else:
+                if sSeverity.lower() != "ok":
+                    # Insert event as it is in event and alert table
+                    try:
+                        iEventID, iAlertID = 0, 0
+
+                        # Insert Event
+                        dRetInsEve = insertEvent(sCIName, sComp, sDesc, sNotes, sSeverity, sCreatedTime, sSource,
+                                                 sStatus)
+                        if dRetInsEve["result"] == "success":
+                            iEventID = dRetInsEve["data"]
+
+                            # Insert Alert
+                            dRetInsAle = insertAlert(sCIName, sComp, sDesc, sNotes, sSeverity, sCreatedTime, sSource,
+                                                     sStatus)
+                            if dRetInsAle["result"] == "success":
+                                iAlertID = dRetInsAle["data"]
+
+                                # Insert into EA Mapping
+                                dRetInsMap = insertEAMapping(iEventID, iAlertID)
+                                if dRetInsMap["result"] == "success":
+
+                                    # Push data to websocket
+                                    #
+
+                                    # Push details to Queue
+                                    dPayload["alert_id"] = iAlertID
+                                    # Declare credentials
+                                    cred = pika.PlainCredentials(sUserName, sPassword)
+                                    # Create Connection
+                                    conn = pika.BlockingConnection(pika.ConnectionParameters(host=sIP, credentials=cred, virtual_host='autointelli'))
+                                    # Create Channel
+                                    channel = conn.channel()
+                                    # decalre queue
+                                    channel.queue_declare(queue='processevents', durable=True)
+                                    # publish data to the queue
+                                    channel.basic_publish(exchange='automationengine', routing_key='automation.processevents', body=json.dumps(dPayload))
+                                    print('Incoming Alert: ' + json.dumps(dPayload))
+                                    # close the connection
+                                    conn.close()
+
+                                    # Store mapping between dropped event and event
+                                    if droppedID != 0:
+                                        dRet = insertDroppedEventMapping(droppedID, iEventID)
+                                        if dRet["result"] == "success":
+                                            return {"result": "success",
+                                                    "data": "Alert Promoted, Created and mapped"}
+                                        else:
+                                            return {"result": "success",
+                                                    "data": "Alert Promoted, Created and failed to map"}
+
+                                    return {"result": "success", "data": "Alert created"}
+                                else:
+                                    return {"result": "success"}
+                            else:
+                                return {"result": "success", "data": "alert dropped"}
+                        else:
+                            return {"result": "success", "data": "event dropped"}
+                    except Exception as e:
+                        # Roll Back code
+                        print(str(e))
+                        return {"result": "failure", "data": str(e)}
+                else:
+                    return {"result": "failure", "data": "Event dropped because the first event itself is coming as OK"}
+        else:
+            return {"result": "failure", "data": """Payload Error - Absent of required information. 
+                                Sample Payload : {"ci_name": "bkp-02", "component": "CPU", "description": "CPU utilization is high", "notes": "CPU utilization is Critical. Used : 96%", "severity": "critical", "event_created_time": "22-03-2018 08:07:12", "source": "NAGIOS" }"""}
+    except Exception as e:
+        return {"result": "failure", "data": str(e)}
+
+def callback(ch, method, properties, body):
+    payload = json.loads(body.decode('utf-8'))
+    print(payload)
+    retJson = processEvent(payload)
+    print(retJson)
+    #if retJson["result"] == "success":
+    #    print('[x] Successfully pushed inside engine: %r' % body)
+    #else:
+    #    print('[x] Failed to push inside engine: %r' % retJson["data"])
+
+import pika
+try:
+    # Get the details of MQ
+    sIP, sUserName, sPassword = "", "", ""
+    sQuery = "select configip ip, username, password from configuration where configname='MQ'"
+    dRet = ConnPostgreSQL.returnSelectQueryResult(sQuery)
+    if dRet["result"] == "success":
+        sIP = dRet["data"][0]["ip"]
+        sUserName = dRet["data"][0]["username"]
+        sPassword = decoder.decode("auto!ntell!", dRet["data"][0]["password"])
+    else:
+        print("unable to fetch information from configuration table")
+
+    # declare credentials
+    credentials = pika.PlainCredentials(sUserName, sPassword)
+    # open connection
+    connection = pika.BlockingConnection(pika.ConnectionParameters(host=sIP, credentials=credentials, virtual_host='autointelli'))
+    # create channel
+    channel = connection.channel()
+    # select queue
+    channel.queue_declare(queue='incoming_events', durable=True)
+    # start consuming -> calls callback
+    channel.queue_bind(exchange='EVM', queue='incoming_events')
+    channel.basic_consume(callback, queue='incoming_events', no_ack=True)
+    channel.start_consuming()
+except Exception as e:
+    print("Worker failed. Reason:" + str(e))
+
+

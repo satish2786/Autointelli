@@ -1,0 +1,20 @@
+{
+	"itsmid": 2,
+	"communication_type": "http",
+	"ip": "itsm-uk-dev.ent.cginet",
+	"port": "80",
+	"username": "Dickson",
+	"password": "Passw0rd",
+	"assignment_group_automation": "Global Service Desk",
+	"assignment_group_manual": "Global Service Desk",
+	"itsm_status": "Assigned",
+	"customer_name": "democustomer",
+	"created_by": "admin",
+        "first_name": "Test",
+        "last_name": "Deepak",
+        "impact": "4-Minor/Localized",
+        "urgency": "4-Low",
+        "source": "Email",
+        "service_type": "Infrastructure Event",
+        "customer_name": "democustomer"
+}

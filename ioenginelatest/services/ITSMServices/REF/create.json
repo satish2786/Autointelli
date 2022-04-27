@@ -1,0 +1,9 @@
+{
+	"Title": "Service Down Alert",
+        "Queue": "Automation",
+	"State": "open",
+	"CustomerUser": "democustomer",
+	"Subject": "Error Httpd Service is down",
+	"Body": "Httpd Service is Down",
+	"Priority": "3 normal"
+}

@@ -1,0 +1,24 @@
+---
+- hosts: all
+  gather_facts: True
+  vars_files:
+    - /usr/local/autointelli/NxtGen/ioengine/services/cmdb/.secrets/{{ KPI }}.yml
+  tasks:
+    - name: Gather Facts
+      debug: msg="Facts Gathered Successfully"
+    
+    - name: Get Disk Usage
+      shell: "df -h --total | tail -1 | awk '{print $5}'| sed 's/.$//'"
+      register: disk_used
+
+    - name: Get CPU Usage
+      shell: "top -b -n 1"
+      register: top
+
+    - name: Set CPU usage facts
+      set_fact:
+        user_cpu: "{{top.stdout_lines[2].split()[1]}}"
+        system_cpu: "{{top.stdout_lines[2].split()[3]}}"
+        total_disk_used: "{{disk_used.stdout}}"
+        cacheable: true
+              

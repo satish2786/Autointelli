@@ -1,0 +1,259 @@
+from services.utils.ConnLog import create_log_file
+import services.utils.LFColors as lfc
+import json
+from services.utils.ValidatorSession import chkValidRequest, chkKeyExistsInHeader, lam_api_key_invalid, lam_api_key_missing
+from flask import request
+from elasticsearch import Elasticsearch
+from datetime import datetime as dt
+import pytz
+import math
+from copy import deepcopy
+
+lfcObj = lfc.bcolors()
+CERROR, CWARN = lfcObj.printerr, lfcObj.printwar
+logObj = create_log_file()
+if not logObj:
+    CERROR("Not able to create logfile")
+    exit(0)
+logERROR, logWARN, logINFO = logObj.error, logObj.warn, logObj.info
+
+def logAndRet(s, x):
+    if s == "failure":
+        logERROR(x)
+    else:
+        logINFO(x)
+    return json.dumps({"result": s, "data": x})
+
+def perfData1(dPayload):
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                _index = "autointelli-network-bandwidth"
+                timezone = dPayload["TimeZone"] #"Asia/Kolkata"
+                start_datetime = dPayload["start_datetime"] #"2020-08-29 00:00"
+                end_datetime = dPayload["end_datetime"] #"2020-08-30 00:00"
+                ip = dPayload["ip"] #"10.225.11.102"
+                port = dPayload["port"] #"54001"
+                nic = dPayload["nic"]
+                user_tz = pytz.timezone(timezone)
+                es_tz = pytz.timezone('GMT')
+
+                user_s, user_e = user_tz.localize(dt.strptime(start_datetime, '%Y-%m-%d %H:%M')), user_tz.localize(
+                    dt.strptime(end_datetime, '%Y-%m-%d %H:%M'))  # Declare I/P to particular timezone
+                gmt_s, gmt_e = user_s.astimezone(es_tz), user_e.astimezone(es_tz)
+                start_datetime = gmt_s.strftime('%Y-%m-%dT%H:%MZ')
+                end_datetime = gmt_e.strftime('%Y-%m-%dT%H:%MZ')
+
+                body = {
+                    "query": {
+                        "bool": {
+                            "filter": [
+                                {
+                                    "match": {
+                                        "{0}.{1}.Name".format(ip, port): "Ethernet54/1"
+                                    }
+                                },
+                                {
+                                    "range": {
+                                        "@timestamp.GMT": {
+                                            "gte": start_datetime,
+                                            "lte": end_datetime
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+
+                print(body)
+                es = Elasticsearch([{'host': '10.227.45.119', 'port': 9200}])
+                result = es.search(index=_index, scroll='2m', body=body, size=10000)
+
+                FinalData, ft = {}, True
+                name, desc, speed, volume = "", "", "", ""
+                sid = result['_scroll_id']
+                scroll_size = len(result['hits']['hits'])
+                tmp = {}
+                if scroll_size <= 0:
+                    return json.dumps({"result": "failure", "data": "no data"})
+                while scroll_size > 0:
+                    data = es.scroll(scroll_id=sid, scroll='2m')
+                    for i in result['hits']['hits']:
+                        d = i['_source'][ip][port]
+                        dtime = es_tz.localize(
+                            dt.strptime(i['_source']['@timestamp']['GMT'], '%Y-%m-%dT%H:%M:%S.%fZ')).astimezone(user_tz)
+                        tmp[dtime] = [d['Traffic In(volume)'], d['Traffic Out(volume)'], d['Traffic Total(volume)'],
+                                      d['Traffic In(speed)'], d['Traffic Out(speed)'], d['Traffic Total(speed)']]
+                        # tmp.append([dtime.strftime('%Y-%m-%d %H:%M'), d['Traffic In(volume)'], d['Traffic Out(volume)'], d['Traffic Total(volume)'],
+                        #          d['Traffic In(speed)'], d['Traffic Out(speed)'], d['Traffic Total(speed)']])
+                        if ft:
+                            name = d['Name']
+                            desc = d['Description']
+                            speed = d['speed(metric)']
+                            volume = d['volume(metric)']
+                            ft = False
+                    sid = data['_scroll_id']
+                    scroll_size = len(data['hits']['hits'])
+
+                FinalData['Name'] = name
+                FinalData['Description'] = desc
+                FinalData['SpeedMetrics'] = speed
+                FinalData['VolumeMetrics'] = volume
+                finalList = []
+                for i in sorted(tmp):
+                    x = [i.strftime('%Y-%m-%d %H:%M')] + tmp[i]
+                    finalList.append(x)
+                finalList.insert(0, ['Date Time', 'Traffic In(volume)', 'Traffic Out(volume)', 'Traffic Total(volume)',
+                                     'Traffic In(speed)', 'Traffic Out(speed)', 'Traffic Total(speed)'])
+                FinalData['plots'] = finalList
+
+                # Aggregate
+                # aggFinal = []
+                # aggre = 5
+                # agg = deepcopy(FinalData['plots'][1:])
+                # inv, outv, totv, ins, outs, tots, mid = 0, 0, 0, 0, 0, 0, ""
+                # mid = agg
+                # for i in range(0, len(mid) - 1, aggre):
+                #     for j in range(0, aggre):
+                #         inv += float(mid[i + j][1])
+                #         outv += float(mid[i + j][2])
+                #         totv += float(mid[i + j][3])
+                #         ins += float(mid[i + j][4])
+                #         outs += float(mid[i + j][5])
+                #         tots += float(mid[i + j][6])
+                #     aggFinal.append(
+                #         ["{0} - {1}".format(mid[i][0], mid[i + (aggre-1)][0]), math.ceil(inv), math.ceil(outv),
+                #          math.ceil(totv), math.ceil(ins / aggre), math.ceil(outs / aggre),
+                #          math.ceil(tots / aggre)])
+                # aggFinal.insert(0, ['Date Time', 'Traffic In(volume)', 'Traffic Out(volume)', 'Traffic Total(volume)',
+                #                     'Traffic In(speed)', 'Traffic Out(speed)', 'Traffic Total(speed)'])
+                # FinalData['plots'] = aggFinal
+
+                # Aggregate
+                # aggFinal = []
+                # aggre = 5
+                # agg = deepcopy(FinalData['plots'][1:])
+                # iniInd = int(dt.strptime(agg[0][0], '%Y-%m-%d %H:%M').strftime('%M')) % aggre
+                # finInd = int(dt.strptime(agg[-1][0], '%Y-%m-%d %H:%M').strftime('%M')) % aggre
+                #
+                # if iniInd > 0:
+                #     inv, outv, totv, ins, outs, tots = 0, 0, 0, 0, 0, 0
+                #     first = agg[0:iniInd]
+                #     samples = len(first)
+                #     for i in first:
+                #         inv += float(i[1])
+                #         outv += float(i[2])
+                #         totv += float(i[3])
+                #         ins += float(i[4])
+                #         outs += float(i[5])
+                #         tots += float(i[6])
+                #     aggFinal.append(["{0} - {1}".format(first[0][0], first[-1][0]), math.ceil(inv), math.ceil(outv),
+                #                      math.ceil(totv), math.ceil(ins / samples), math.ceil(outs / samples),
+                #                      math.ceil(tots / samples)])
+                #
+                # inv, outv, totv, ins, outs, tots, mid = 0, 0, 0, 0, 0, 0, ""
+                # if (iniInd == 0 and finInd == 0) or finInd == 0:
+                #     mid = agg[iniInd:]
+                # else:
+                #     mid = agg[iniInd:-finInd]
+                # for i in range(0, len(mid)-1, aggre):
+                #     for j in range(0, aggre):
+                #         inv += float(mid[i + j][1])
+                #         outv += float(mid[i + j][2])
+                #         totv += float(mid[i + j][3])
+                #         ins += float(mid[i + j][4])
+                #         outs += float(mid[i + j][5])
+                #         tots += float(mid[i + j][6])
+                #     aggFinal.append(
+                #         ["{0} - {1}".format(mid[i][0], mid[i + aggre][0]), math.ceil(inv), math.ceil(outv),
+                #          math.ceil(totv), math.ceil(ins / aggre), math.ceil(outs / aggre),
+                #          math.ceil(tots / aggre)])
+                #
+                # if finInd > 0:
+                #     inv, outv, totv, ins, outs, tots = 0, 0, 0, 0, 0, 0
+                #     last = agg[-finInd:]
+                #     samples = len(last)
+                #     for i in last:
+                #         inv += float(i[1])
+                #         outv += float(i[2])
+                #         totv += float(i[3])
+                #         ins += float(i[4])
+                #         outs += float(i[5])
+                #         tots += float(i[6])
+                #     aggFinal.append(["{0} - {1}".format(last[0][0], last[-1][0]), math.ceil(inv), math.ceil(outv), math.ceil(totv),
+                #          math.ceil(ins / samples), math.ceil(outs / samples), math.ceil(tots / samples)])
+                #
+                # aggFinal.insert(0, ['Date Time', 'Traffic In(volume)', 'Traffic Out(volume)', 'Traffic Total(volume)',
+                #                      'Traffic In(speed)', 'Traffic Out(speed)', 'Traffic Total(speed)'])
+                # FinalData['plots'] = aggFinal
+
+                # Sum and Average
+                samples = len(FinalData['plots'][1:])
+                vin, vout, vtot, sin, sout, stot = 0, 0, 0, 0, 0, 0
+                for i in FinalData['plots'][1:]:
+                    vin += float(i[1])
+                    vout += float(i[2])
+                    vtot += float(i[3])
+                    sin += float(i[4])
+                    sout += float(i[5])
+                    stot += float(i[6])
+                FinalData['Sums'] = {'Traffic In(volume)': math.ceil(vin), 'Traffic Out(volume)': math.ceil(vout), 'Traffic Total(volume)': math.ceil(vtot)}
+                FinalData['Average'] = {'Traffic In(volume)': math.ceil(vin/samples), 'Traffic Out(volume)': math.ceil(vout/samples), 'Traffic Total(volume)': math.ceil(vtot/samples),
+                                      'Traffic In(speed)': math.ceil(sin/samples), 'Traffic Out(speed)': math.ceil(sout/samples), 'Traffic Total(speed)': math.ceil(stot/samples)}
+                return json.dumps({"result": "success", "data": FinalData})
+            except Exception as e:
+                return logAndRet("failure", "Exception: {0}".format(str(e)))
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def perfMaster():
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                data = {'10.225.11.102':
+                                 {'2': 'NG4-UPLINK-FW-1500D-PORT-40',
+                                  '49001': 'Connected-to-spine-1-fo-1/0/49',
+                                  '50001': 'Connected-to-spine-2-fo-2/0/50',
+                                  '51001': 'ARISTA-BMS-R1',
+                                  '53001': 'Check Uplink Traffic',
+                                  '54001': 'New-Airtel-40-G-Link Traffic'},
+                             '10.225.11.103':
+                                 {'1': 'ET1',
+                                  '2': 'NG4-UPLINK-FW-1500D-PORT-39',
+                                  '43': 'TCL-2G-ILL-Circuit-ID_091BENG030029471009',
+                                  '44': 'ET44',
+                                  '47': 'Everbiz-FW',
+                                  '49001': 'Connected-to-spine-2-fo-2/0/49',
+                                  '50001': 'Connected-to-spine-1-fo-1/0/50'}
+                             }
+
+                return json.dumps({"result": "success", "data": data})
+            except Exception as e:
+                return logAndRet("failure", "Exception: {0}".format(str(e)))
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

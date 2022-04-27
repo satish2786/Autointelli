@@ -1,0 +1,9 @@
+- name: Transfer and execute a script.
+  hosts: all
+  tasks:
+
+     - name: Copy and Execute the script 
+       script: "{{ script_name }}"
+       register: hello
+
+     - debug: msg="{{ hello.stdout }}"

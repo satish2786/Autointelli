@@ -1,0 +1,64 @@
+---
+- name: Create a VM from a template -- Control Machine
+  hosts: localhost
+  gather_facts: no
+  vars:
+    vc_ip: "{{ vcenter_ipaddress }}"
+    vc_usr: "{{ vcenter_username }}"
+    vc_pwd: "{{ vcenter_password }}"
+    guest_ip: "{{ guest_ipaddress }}"
+    guest_host: "{{ guest_hostname }}"
+    guest_usr: "{{ guest_username }}"
+    guest_pwd: "{{ guest_password }}"
+    template: "{{ guest_template }}"
+    datacenter: "{{ datacenter }}"
+    cluster: "{{ cluster }}"
+    network: "{{ network }}"
+    subnetmask: "{{ guest_subnetmask }}"
+    gateway: "{{ guest_gatewayip }}"
+    datastore: "{{ datastore }}"
+
+  tasks:
+
+  - name: Clone from linux template
+    vmware_guest:
+      hostname: "{{ vc_ip }}"
+      username: "{{ vc_usr }}"
+      password: "{{ vc_pwd }}"
+      validate_certs: False
+      name: "{{ guest_host }}"
+      template: "{{ template }}"
+      datacenter: "{{ datacenter }}"
+      folder: /
+      state: poweredon
+      cluster: "{{ cluster }}"
+      wait_for_ip_address: no
+      networks:
+        - name : "{{ network}}"
+          ip : "{{ guest_ip }}"
+          netmask : "{{ subnetmask }}"
+          gateway : "{{ gateway }}"
+          start_connected : True
+
+  - name : Wait for port 22 to become open on the host
+    wait_for:
+      host: "{{ guest_ip }}"
+      port: 22
+      delay: 120
+
+  - name: Create Directory .ssh in home
+    vmware_vm_shell:
+      hostname: "{{ vc_ip }}"
+      username: "{{ vc_usr }}"
+      password: "{{ vc_pwd }}"
+      datacenter: "{{ datacenter }}"
+      folder: "/"
+      vm_id: "{{ guest_host }}"
+      vm_username: "{{ guest_usr }}"
+      vm_password: "{{ guest_pwd }}"
+      vm_shell: "/usr/bin/mkdir"
+      vm_shell_args: " ~/.ssh"
+      validate_certs: no
+
+  - name: Copy the id_rsa.pub from control to newly provisioned machine
+    command: sshpass -p "{{ guest_pwd }}" scp ~/.ssh/id_rsa.pub "{{ guest_usr }}"@"{{ guest_ip }}":~/.ssh/authorized_keys

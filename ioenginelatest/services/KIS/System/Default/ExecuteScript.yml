@@ -1,0 +1,12 @@
+---
+- name: Execute Script in Remote Machine.
+  hosts: all
+  gather_facts: False
+  vars_files:
+    - /usr/local/autointelli/ioengine/services/cmdb/.vault
+  tasks:
+     - name: Execute the script
+       command: "{{ script_name  }}"
+       register: shell_out
+
+     - debug: msg="{{ shell_out.stdout }}"

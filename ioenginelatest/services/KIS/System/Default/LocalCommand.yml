@@ -1,0 +1,14 @@
+---
+- hosts: 127.0.0.1
+  connection: local
+  gather_facts: false
+  tasks:
+  - name: Execute a local command
+    command: /root/TEST.py
+    delegate_to: localhost
+    register: result
+
+  - name: Show results
+    debug:
+      var: result.stdout
+    delegate_to: localhost

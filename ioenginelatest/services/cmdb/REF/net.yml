@@ -1,0 +1,6 @@
+---
+- hosts: ios_routers
+  connection: network_cli
+  tasks:
+    - ios_facts:
+        gather_subset: all

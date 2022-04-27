@@ -1,0 +1,12 @@
+---
+- hosts: all
+  connection: local
+  vars_files:
+    - /usr/local/autointelli/ioengine/services/cmdb/.secrets/{{ KPI }}.yml
+  tasks:
+    - ios_facts:
+        gather_subset: all
+
+    - name: Gather Facts
+      debug: msg="Facts Gathered Successfully"
+

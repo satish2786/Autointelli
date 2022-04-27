@@ -1,0 +1,105 @@
+---
+- name: Provision a Windows Virtual Machine from Template and add the Machine to Domain
+  hosts: localhost
+  gather_facts: no
+  vars:
+    vc_ip: "{{ vcenter_ipaddress }}"
+    vc_usr: "{{ vcenter_username }}"
+    vc_pwd: "{{ vcenter_password }}"
+    guest_ip: "{{ guest_ipaddress }}"
+    guest_host: "{{ guest_hostname }}"
+    guest_usr: "{{ guest_username }}"
+    guest_pwd: "{{ guest_password }}"
+    template: "{{ guest_template }}"
+    datacenter: "{{ datacenter }}"
+    cluster: "{{ cluster }}"
+    network: "{{ network }}"
+    subnetmask: "{{ guest_subnetmask }}"
+    gateway: "{{ guest_gatewayip }}"
+    softwares: "{{ guest_softwares }}"
+    datastore1: "{{ datastore }}"
+    domain: "{{ guest_domain }}"
+
+  tasks:
+
+  - name: Clone from windows template and add to sfl.ad domain
+    vmware_guest:
+      hostname: "{{ vc_ip }}"
+      username: "{{ vc_usr }}"
+      password: "{{ vc_pwd }}"
+      validate_certs: False
+      name: "{{ guest_host }}"
+      template: "{{ template }}"
+      datacenter: "{{ datacenter }}"
+      folder: /
+      state: poweredon
+      cluster: "{{ cluster }}"
+      wait_for_ip_address: no
+      datastore: "{{ datastore1 }}"
+      networks:
+        - name : "{{ network}}"
+          ip : "{{ guest_ip }}"
+          netmask : "{{ subnetmask }}"
+          gateway : "{{ gateway }}"
+          domain: "{{ domain }}"
+          dns_servers:
+          - 10.21.21.120
+          - 10.21.21.121
+          - 172.25.50.151
+      customization:
+        hostname: "{{ guest_host }}"
+        dns_servers:
+        - 10.21.21.120
+        - 10.21.21.121
+        - 172.25.50.151
+        domain: "{{ domain }}"
+        password: "{{ guest_pwd }}"
+        joindomain: "{{ domain }}"
+        domainadmin: aiadjoin@sfl.ad
+        domainadminpassword: Tmate@1310!
+      wait_for_customization: yes
+
+    when: domain == "sfl.ad"
+    register: results
+
+  - name: Clone from windows template and add to sfl-sis.sfl.ad domain
+    vmware_guest:
+      hostname: "{{ vc_ip }}"
+      username: "{{ vc_usr }}"
+      password: "{{ vc_pwd }}"
+      validate_certs: False
+      name: "{{ guest_host }}"
+      template: "{{ template }}"
+      datacenter: "{{ datacenter }}"
+      folder: /
+      state: poweredon
+      cluster: "{{ cluster }}"
+      wait_for_ip_address: no
+      datastore: "{{ datastore1 }}"
+      networks:
+        - name : "{{ network}}"
+          ip : "{{ guest_ip }}"
+          netmask : "{{ subnetmask }}"
+          gateway : "{{ gateway }}"
+          domain: "{{ domain }}"
+          dns_servers:
+          - 10.21.21.123
+          - 172.25.50.151
+      customization:
+        hostname: "{{ guest_host }}"
+        dns_servers:
+        - 10.21.21.123
+        - 172.25.50.151
+        domain: "{{ domain }}"
+        password: "{{ guest_pwd }}"
+        joindomain: "{{ domain }}"
+        domainadmin: aiadjoin@sfl.ad
+        domainadminpassword: Tmate@1310!
+      wait_for_customization: yes
+
+    when: domain == "sfl-sis.sfl.ad"
+    register: results
+
+  - name: display results
+    debug:
+      msg: "{{ results }}"

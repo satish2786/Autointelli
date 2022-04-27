@@ -1,0 +1,153 @@
+#============================================================================================
+# Author        : Dinesh Balaraman
+# Created On    :
+# (c) Copyright by Autointelli Technologies
+#============================================================================================
+
+from flask import Flask, jsonify, request
+import json
+from services.utils import ConnPostgreSQL as conn
+from services.utils import sessionkeygen as sess
+import services.utils.validator_many as val
+import nmap
+import requests as req
+
+def lam_api_key_missing():
+    return json.dumps({"result": "failure", "data": "api-key missing"})
+
+def lam_api_key_invalid():
+    return json.dumps({"result": "failure", "data": "invalid api-key"})
+
+lam_api_key_missing = lam_api_key_missing()
+lam_api_key_invalid = lam_api_key_invalid()
+
+def getTimeZone(sKey):
+    dRet = sess.getUserDetailsBasedWithSessionKey(sKey)
+    if dRet["result"] == "success":
+        return dRet["data"][0]["time_zone"]
+    else:
+        return "no data"
+
+def chkValidRequest(key):
+    sQuery = "select * from tbl_session_keys where session_key='" + key + "' and active_yn='Y'"
+    dRet = conn.returnSelectQueryResult(sQuery)
+    if dRet["result"] == "success":
+        return True
+    else:
+        return False
+
+def chkKeyExistsInHeader(key):
+    try:
+        #print(request.headers)
+        tmp = request.headers["SESSIONKEY"]
+        return True
+    except KeyError as e:
+        return False
+    except Exception as e:
+        return False
+
+def callback_result(host, scan_result):
+    print('-' * 50)
+    sIPAddress, sOS = "", ""
+    sIPAddress = host
+    if scan_result['nmap']['scanstats']['uphosts'] == '1':
+        sOS = scan_result['scan'][host]['osmatch'][0]['osclass'][0]['osfamily']
+    else:
+        sOS = "not reachable"
+
+    sDisQuery = "insert into ai_device_discovery(ip_address, operating_system, gf_yn) values('%s', '%s', 'N')" %(sIPAddress, sOS)
+    dRet = conn.returnInsertResult(sDisQuery)
+    if dRet["result"] == "success":
+        #call the Async APIs
+        sURL = "http://localhost:8000/api/v2/async/"
+        dHeader = {'content-type': 'application/json'}
+        dData = {"Module": "discovery", "InformationType": "json", "Data": {"ipaddress": sIPAddress, "OS": sOS}, "Action": "create"}
+        ret = req.post(url=sURL, headers=dHeader, json=dData)
+        if ret.status_code == 200:
+            pass #success
+    else:
+        pass #future development
+
+def startDiscovery(dPayload):
+    """pIPRange: IP Range => '192.168.1.100-110' """
+    nma = nmap.PortScannerAsync()
+    pIPRange = dPayload["ip_range"]
+    nma.scan(hosts=pIPRange, arguments='-O -p 22-443', callback=callback_result)
+    while nma.still_scanning():
+        nma.wait(5)
+    return json.dumps({'result': 'success', 'data': 'Device Discovery'})
+
+def getDeviceYetToDiscoverList():
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQuery = "select ip_address, operating_system, cred_name, cred_type, username, password, sudo_yn from ai_device_discovery left join ai_device_credentials on(fk_cred_id=cred_id) where gf_yn='N'"
+                dRet = conn.returnSelectQueryResult(sQuery)
+                if dRet["result"] == "success":
+                    return json.dumps(dRet)
+                else:
+                    return json.dumps(dRet.update({"error": "Unable to fetch Discovery List from database."}))
+            except Exception as e:
+                return json.dumps({"result": "success", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def createMappingDiscoveryAndCredentials(dPayload):
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                if "mappers" in dPayload.keys():
+                    s, f = 0, 0
+                    for eachItem in dPayload["mappers"]:
+                        iUpdate = "update ai_device_discovery set fk_cred_id=(select cred_id from ai_device_credentials where lower(cred_name)='" + eachItem[1].lower() + "') where ip_address='" + eachItem[0] + "'"
+                        dRet = conn.returnInsertResult(iUpdate)
+                        if dRet["result"] == "success":
+                            s += 1
+                        else:
+                            f += 1
+                    return json.dumps({"result": "success", "data": "Successfully Mapped Credentials"})
+                else:
+                    return json.dumps({"result": "failure", "data": "Invalid Payload"})
+            except Exception as e:
+                return json.dumps({"result": "success", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def deAttachCredentailsFromMachine(dPayload):
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                if "device_list" in dPayload.keys():
+                    iUpdate = "update ai_device_discovery set fk_cred_id=null where ip_address in('" + "','".join(dPayload["device_list"]) + "')"
+                    dRet = conn.returnInsertResult(iUpdate)
+                    if dRet["result"] == "success":
+                        return json.dumps({"result": "success", "data": "De-Attached Successfully"})
+                    else:
+                        return json.dumps({"result": "failure", "data": "Couldn't De-Attach"})
+                else:
+                    return json.dumps({"result": "failure", "data": "Invalid Payload"})
+            except Exception as e:
+                return json.dumps({"result": "success", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+def getMastersBasedOnName(item):
+    dTableNames = {'machine_class': {'column': ['mclass_name'], 'table': 'ai_machine_class'},
+                   'software_class': {'column': ['sclass_name'], 'table': 'ai_software_class'},
+                   'software_subclass': {'column': ['ssclass_name'], 'table': 'ai_software_subclass'},
+                   'resource_class': {'column': ['rclass_name'], 'table': 'ai_resource_class'},
+                   'application_class': {'column': ['aclass_name'], 'table': 'ai_application_class'},
+                   'application_subclass': {'column': ['asclass_name'], 'table': 'ai_application_subclass'}}
+    sQuery = "select " + ",".join(dTableNames[item]['column']) + " from " + dTableNames[item]['table'] + " where active_yn='Y'"
+    dRet = conn.returnSelectQueryResultAsList(sQuery)
+    if dRet["result"] == "success":
+        return json.dumps(dRet)
+    else:
+        return json.dumps({"result": "failure", "data": "couldn't load the data from the database"})
+

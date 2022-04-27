@@ -1,0 +1,716 @@
+#============================================================================================
+# Author        : Dinesh Balaraman
+# Created On    :
+# (c) Copyright by Autointelli Technologies
+#============================================================================================
+
+from flask import Flask, request
+from flask_cors import CORS, cross_origin
+import json
+from datetime import datetime, timedelta
+from services.utils.ConnPostgreSQL import returnSelectQueryResult, returnSelectQueryResultConvert2Col2Dict, returnSelectQueryResultAsList
+
+root = "/dashboard/api1.0"
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'the quick brown fox jumps over the lazy   dog'
+app.config['CORS_HEADERS'] = 'Content-Type'
+cors = CORS(app, resources={r"/ui/*": {"origins": "http://localhost:port"}})
+#https://github.com/corydolphin/flask-cors/blob/master/examples/app_based_example.py
+
+def lam_api_key_missing():
+    return json.dumps({"result": "failure", "data": "api-key missing"})
+
+def lam_api_key_invalid():
+    return json.dumps({"result": "failure", "data": "invalid api-key"})
+
+lam_api_key_missing = lam_api_key_missing()
+lam_api_key_invalid = lam_api_key_invalid()
+
+#Date Management
+wToday = datetime.now().strftime('%d-%b-%Y')
+wYesterday = (datetime.now() - timedelta(days=1)).strftime('%d-%b-%Y')
+wWeekStart = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime('%d-%b-%Y')
+wWeekEnd = ((datetime.now() - timedelta(days=datetime.now().weekday()))  +  timedelta(days=6)).strftime('%d-%b-%Y')
+wMonthStart = datetime.today().replace(day=1).strftime('%d-%b-%Y')
+wMonthEnd = wToday
+wPreviousMonthEnd = (datetime.strptime(wMonthStart,'%d-%b-%Y') - timedelta(days=1)).strftime('%d-%b-%Y')
+wPreviousMonthStart = (datetime.strptime(wPreviousMonthEnd,'%d-%b-%Y').replace(day=1)).strftime('%d-%b-%Y')
+
+def returnQueryCondition(pCond, pColumnName, pDate=0):
+    pCond = pCond.lower()
+    sQueryCond = ""
+    if pCond == "all":
+        sQueryCond = "1=1"
+    elif pCond == "today":
+        sQueryCond = pColumnName + " >= to_date('" + wToday + "','DD-MON-YYYY')"
+    elif pCond == "yesterday":
+        sQueryCond = pColumnName + " >= to_date('" + wYesterday + "','DD-MON-YYYY') and " + pColumnName + " < to_date('" + wToday + "','DD-MON-YYYY')"
+    elif pCond == "this_week":
+        sQueryCond = pColumnName + " >= to_date('" + wWeekStart + "','DD-MON-YYYY') and " + pColumnName + " <= to_date('" + wWeekEnd + "','DD-MON-YYYY')"
+    elif pCond == "this_month":
+        sQueryCond = pColumnName + " >= to_date('" + wMonthStart + "','DD-MON-YYYY') and " + pColumnName + " <= to_date('" + wMonthEnd + "','DD-MON-YYYY')"
+    elif pCond == "last_month":
+        sQueryCond = pColumnName + " >= to_date('" + wPreviousMonthStart + "','DD-MON-YYYY') and " + pColumnName + " <= to_date('" + wPreviousMonthEnd + "','DD-MON-YYYY')"
+    elif pCond == "date_range":
+        sFromDate = pDate.strip().split('__')[0].replace('_','-')
+        sEndDate = pDate.strip().split('__')[1].replace('_', '-')
+        sQueryCond = pColumnName + " >= to_date('" + sFromDate + "','DD-MON-YYYY') and " + pColumnName + " <= to_date('" + sEndDate + "','DD-MON-YYYY')"
+    return sQueryCond
+
+def chkValidRequest(key):
+    sQuery = "select * from tbl_session_keys where session_key='" + key + "' and active_yn='Y'"
+    dRet = returnSelectQueryResult(sQuery)
+    if dRet["result"] == "success":
+        return True
+    else:
+        return False
+
+def chkKeyExistsInHeader(key):
+    try:
+        print(request.headers)
+        tmp = request.headers["SESSIONKEY"]
+        return True
+    except KeyError as e:
+        return False
+    except Exception as e:
+        return False
+
+##################################################################################
+# Event Management Section
+##################################################################################
+
+@app.route(root + '/suppressionpercent/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getSuppPercent(when, date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when, "to_date(to_char(to_timestamp(event_created_time),'DD-MON-YYYY'),'DD-MON-YYYY')",  date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sDropQuery = "select count(*) as dropped_count from dropped_event where " + sWhereCondition1
+                sSupQuery = "select count(*) as suppression_count from event_data where " + sWhereCondition1
+                rDropCount = returnSelectQueryResult(sDropQuery)
+                rSupQuery = returnSelectQueryResult(sSupQuery)
+                if rDropCount["result"] == "success" and rSupQuery["result"] == "success":
+                    iDropCount = rDropCount["data"][0]["dropped_count"]
+                    iSupCount = rSupQuery["data"][0]["suppression_count"]
+                    total = iDropCount + iSupCount
+                    drop = ((iDropCount/total) * 100) if total !=0 else 0
+                    sup = ((iSupCount/total) * 100) if total != 0 else 0
+                    retFinal = {"total": total, "suppressed_count": iSupCount, "dropped_count": iDropCount, "dropped_percent": drop, "suppressed_percent": sup}
+                    return json.dumps({"result": "success", "data": retFinal})
+                else:
+                    return json.dumps({"result": "failure", "data": "no data"})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/top5ci/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getTop5CI(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(to_timestamp(event_created_time),'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                dFinalDict = {}
+                sQuery = "select ci_name,count(ci_name) from event_data where " + sWhereCondition1 + " group by ci_name order by count(ci_name) desc limit 5"
+                retQuery = returnSelectQueryResultConvert2Col2Dict(sQuery,SortByVal=True)
+                return json.dumps(retQuery)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/top3alertcomponent/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getTop3AlertProducingComp(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(to_timestamp(event_created_time),'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQuery = "select component,count(component) as total from alert_data where " + sWhereCondition1 + " group by component order by total desc LIMIT 3"
+                retResult = returnSelectQueryResultConvert2Col2Dict(sQuery,SortByVal=True)
+                return json.dumps(retResult)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/alertbyseverity/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getAlertBySeverity(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(to_timestamp(event_created_time),'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQuery = "select lower(severity), count(lower(severity)) from alert_data where " + sWhereCondition1 + " and lower(severity) not in ('ok') group by lower(severity)"
+                retResult = returnSelectQueryResultConvert2Col2Dict(sQuery,SortByVal=True)
+                return json.dumps(retResult)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/suppression30days/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getSuppressionFor30Days(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(to_timestamp(event_created_time),'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQueryEve, sQueryAle = "", ""
+                if when in ["this_month", "last_month", "date_range"]:
+                    sQueryEve = "select to_char(to_timestamp(event_created_time),'DD-MON-YY') as EventDate,count(*) Cnt from event_data where " + sWhereCondition1 + " group by EventDate"
+                    sQueryAle = "select to_char(to_timestamp(event_created_time),'DD-MON-YY') as AlertDate,count(*) Cnt from alert_data where " + sWhereCondition1 + " group by AlertDate"
+                else:
+                    sQueryEve = "select to_char(to_timestamp(event_created_time),'DD-MON-YY') as EventDate,count(*) Cnt from event_data where to_timestamp(event_created_time) > ( now() - INTERVAL '30 DAY') group by EventDate"
+                    sQueryAle = "select to_char(to_timestamp(event_created_time),'DD-MON-YY') as AlertDate,count(*) Cnt from alert_data where to_timestamp(event_created_time) > ( now() - INTERVAL '30 DAY') group by AlertDate"
+                dRetE = returnSelectQueryResult(sQueryEve)
+                dRetA = returnSelectQueryResult(sQueryAle)
+                if dRetE["result"] == "success" and dRetA["result"] == "success":
+
+                    lXAxis, lEveAxis, lAleAxis = [], [], []
+                    sCalculatedDate, iRange = None, 30
+
+                    #Logic for multiple date selection in Analytics page
+                    if when == "this_month":
+                        sCalculatedDate = datetime.strptime(wMonthEnd,'%d-%b-%Y')
+                        iRange = (datetime.strptime(wMonthEnd, '%d-%b-%Y') - datetime.strptime(wMonthStart,'%d-%b-%Y')).days
+                    elif when == "last_month":
+                        sCalculatedDate = datetime.strptime(wPreviousMonthEnd, '%d-%b-%Y')
+                        iRange = (datetime.strptime(wPreviousMonthEnd, '%d-%b-%Y') - datetime.strptime(wPreviousMonthStart,'%d-%b-%Y')).days
+                    elif when == "date_range":
+                        sFromDate = date.strip().split('__')[0].replace('_', '-')
+                        sEndDate = date.strip().split('__')[1].replace('_', '-')
+                        sCalculatedDate = datetime.strptime(sEndDate, '%d-%b-%Y')
+                        iRange = (datetime.strptime(sEndDate, '%d-%b-%Y') - datetime.strptime(sFromDate, '%d-%b-%Y')).days
+                    else:
+                        sCalculatedDate = datetime.now()
+                        iRange = 30
+
+                    iRange += 1 #This is to solve substraction issue in date
+
+                    for i in reversed(range(0,iRange)):
+                        sRefDate =  ((sCalculatedDate - timedelta(days=i)).strftime('%d-%b-%y')).upper()
+                        dEveGroup =  {eD['eventdate'].upper():eD["cnt"] for eD in dRetE["data"]}
+                        lEveGroup = dEveGroup.keys()
+                        lXAxis.append(sRefDate)
+                        if sRefDate in lEveGroup:
+                            lEveAxis.append(dEveGroup[sRefDate])
+                        else:
+                            lEveAxis.append(0)
+                        dAleGroup = {aD['alertdate'].upper(): aD["cnt"] for aD in dRetA["data"]}
+                        lAleGroup = dAleGroup.keys()
+                        if sRefDate in lAleGroup:
+                            lAleAxis.append(dAleGroup[sRefDate])
+                        else:
+                            lAleAxis.append(0)
+
+                    dRetFinal = {}
+                    dRetFinal["x-axis"] = lXAxis
+                    dRetFinal["event"] = lEveAxis
+                    dRetFinal["alert"] = lAleAxis
+
+                    # Range more than 30 solved here
+                    iInto30 = iRange / 30
+                    iLoopCnt = iInto30 if int(iInto30) == iInto30 else int(iInto30) + 1
+                    lFixXAxis, lFixEveAxis, lFixAleAxis = [], [], []
+                    print(lEveAxis)
+                    print(lAleAxis)
+                    print(iRange)
+                    if iInto30 > 1.034:
+                        for eachItem in range(0,iRange,iLoopCnt):
+                            iLastIndex =(eachItem + iLoopCnt) if (eachItem + iLoopCnt) < iRange else None
+                            print(str(eachItem) + " -- " + str(iLastIndex))
+                            lFixXAxis.append(lXAxis[eachItem] + "--" + (lXAxis[-1] if iLastIndex == None else lXAxis[iLastIndex-1]))
+                            lFixEveAxis.append(sum(lEveAxis[eachItem:iLastIndex]))
+                            lFixAleAxis.append(sum(lAleAxis[eachItem:iLastIndex]))
+
+                        dRetFinal.clear()
+                        dRetFinal["x-axis"] = lFixXAxis
+                        dRetFinal["event"] = lFixEveAxis
+                        dRetFinal["alert"] = lFixAleAxis
+
+                    return json.dumps({"result": "success", "data": dRetFinal })
+
+                else:
+                    return json.dumps({"result": "failure", "data": "no data found"})
+
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/weeklyheatmap', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getWeeklyHeatMap():
+    """Method: Returns the roles available in backend"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQueryEve = "select to_char(to_timestamp(event_created_time),'DD-MON-YY HH24') as EventDate,count(*) Cnt from event_data where to_timestamp(event_created_time) > ( now() - INTERVAL '30 DAY') group by EventDate"
+                sQueryAle = "select to_char(to_timestamp(event_created_time),'DD-MON-YY HH24') as AlertDate,count(*) Cnt from alert_data where to_timestamp(event_created_time) > ( now() - INTERVAL '30 DAY') group by AlertDate"
+                dRetE = returnSelectQueryResult(sQueryEve)
+                dRetA = returnSelectQueryResult(sQueryAle)
+                if dRetE["result"] == "success" and dRetA["result"] == "success":
+
+                    #lXAxis, lEveAxis, lAleAxis = [], [], []
+                    lFinalResult = {}
+                    lMainEeventHM, lMainAlertHM = [], []
+                    iWeekNumber = 0
+                    today = datetime.now()
+                    minus = today.weekday()
+                    today = today - timedelta(days=minus)
+                    iWeekNumber = today.isocalendar()[1]
+                    sStartDateTime = today.strftime("%d-%b-%Y").upper()
+                    sEndDateTime = ((today + timedelta(days=6)).strftime('%d-%b-%Y')).upper()
+                    for i in range(0,7):
+                        lXAxis, lEveAxis, lAleAxis = [], [], []
+                        ftime = ((today + timedelta(days=i)).strftime('%d-%b-%y')).upper()
+                        td = datetime.strptime(ftime,'%d-%b-%y')
+
+                        for j in range(0,24):
+                            sRefDate = (td + timedelta(hours=j)).strftime("%d-%b-%y %H").upper()
+
+                            dEveGroup =  {eD['eventdate'].upper():eD["cnt"] for eD in dRetE["data"]}
+                            lEveGroup = dEveGroup.keys()
+                            lXAxis.append(sRefDate)
+                            if sRefDate in lEveGroup:
+                                lEveAxis.append(dEveGroup[sRefDate])
+                                lMainEeventHM.append([i,j,dEveGroup[sRefDate]])
+                            else:
+                                lEveAxis.append(0)
+                                lMainEeventHM.append([i, j, 0])
+
+                            dAleGroup = {aD['alertdate'].upper(): aD["cnt"] for aD in dRetA["data"]}
+                            lAleGroup = dAleGroup.keys()
+                            if sRefDate in lAleGroup:
+                                lAleAxis.append(dAleGroup[sRefDate])
+                                lMainAlertHM.append([i,j,dAleGroup[sRefDate]])
+                            else:
+                                lAleAxis.append(0)
+                                lMainAlertHM.append([i, j, 0])
+
+                    lFinalResult["WeekNumber"] = "Week :" + str(iWeekNumber) + " (" + sStartDateTime + " to " + sEndDateTime + ")"
+                    lFinalResult["EventCoords"] = lMainEeventHM
+                    lFinalResult["AlertCoords"] = lMainAlertHM
+
+                    return json.dumps({"result": "success", "data": lFinalResult })
+
+                else:
+                    return json.dumps({"result": "failure", "data": "no data found"})
+
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/weeklyheatmap/<weeknumber>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getWeeklyHeatMapForParticularWeek(weeknumber):
+    """Method: Returns the roles available in backend"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQueryEve = "select to_char(to_timestamp(event_created_time),'DD-MON-YY HH24') as EventDate,count(*) Cnt from event_data where to_timestamp(event_created_time) > ( now() - INTERVAL '30 DAY') group by EventDate"
+                sQueryAle = "select to_char(to_timestamp(event_created_time),'DD-MON-YY HH24') as AlertDate,count(*) Cnt from alert_data where to_timestamp(event_created_time) > ( now() - INTERVAL '30 DAY') group by AlertDate"
+                dRetE = returnSelectQueryResult(sQueryEve)
+                dRetA = returnSelectQueryResult(sQueryAle)
+                if dRetE["result"] == "success" and dRetA["result"] == "success":
+
+                    #lXAxis, lEveAxis, lAleAxis = [], [], []
+                    weeknumber = int(weeknumber)
+                    lFinalResult = {}
+                    lMainEeventHM, lMainAlertHM = [], []
+                    iWeekNumber = 0
+                    today = datetime.now()
+                    minus = today.weekday()
+                    today = today - timedelta(days=minus)
+                    iWeekNumber = today.isocalendar()[1]
+
+                    if iWeekNumber == weeknumber or iWeekNumber > weeknumber:
+
+                        iToBeIncreased = iWeekNumber - weeknumber
+                        today = today - timedelta(days=(iToBeIncreased*7))
+                        iWeekNumber = today.isocalendar()[1]
+
+                        sStartDateTime = today.strftime("%d-%b-%Y").upper()
+                        sEndDateTime = ((today + timedelta(days=6)).strftime('%d-%b-%Y')).upper()
+                        for i in range(0, 7):
+                            lXAxis, lEveAxis, lAleAxis = [], [], []
+                            ftime = ((today + timedelta(days=i)).strftime('%d-%b-%y')).upper()
+                            td = datetime.strptime(ftime, '%d-%b-%y')
+
+                            for j in range(0, 24):
+                                sRefDate = (td + timedelta(hours=j)).strftime("%d-%b-%y %H").upper()
+
+                                dEveGroup = {eD['eventdate'].upper(): eD["cnt"] for eD in dRetE["data"]}
+                                lEveGroup = dEveGroup.keys()
+                                lXAxis.append(sRefDate)
+                                if sRefDate in lEveGroup:
+                                    lEveAxis.append(dEveGroup[sRefDate])
+                                    lMainEeventHM.append([i, j, dEveGroup[sRefDate]])
+                                else:
+                                    lEveAxis.append(0)
+                                    lMainEeventHM.append([i, j, 0])
+
+                                dAleGroup = {aD['alertdate'].upper(): aD["cnt"] for aD in dRetA["data"]}
+                                lAleGroup = dAleGroup.keys()
+                                if sRefDate in lAleGroup:
+                                    lAleAxis.append(dAleGroup[sRefDate])
+                                    lMainAlertHM.append([i, j, dAleGroup[sRefDate]])
+                                else:
+                                    lAleAxis.append(0)
+                                    lMainAlertHM.append([i, j, 0])
+
+                        lFinalResult["WeekNumber"] = "Week :" + str(iWeekNumber) + " (" + sStartDateTime + " to " + sEndDateTime + ")"
+                        lFinalResult["EventCoords"] = lMainEeventHM
+                        lFinalResult["AlertCoords"] = lMainAlertHM
+
+                        return json.dumps({"result": "success", "data": lFinalResult})
+                    else:
+                        return json.dumps({"result": "failure", "data": "invalid week request"})
+
+                else:
+                    return json.dumps({"result": "failure", "data": "no data found"})
+
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+
+
+##################################################################################
+# Executive Summary
+##################################################################################
+
+# Header
+##################################################################################
+@app.route(root + '/executiveheaders/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getExecutiveHeaders(when, date):
+    """Method: Return the main header on executive summary page"""
+    sWhereCondition1 = returnQueryCondition(when, "to_date(to_char(to_timestamp(event_created_time),'DD-MON-YYYY'),'DD-MON-YYYY')", date)
+    sWhereCondition2 = returnQueryCondition(when, "to_date(to_char(ticketcreatedtime,'DD-MON-YYYY'),'DD-MON-YYYY')", date)
+    sWhereCondition3 = returnQueryCondition(when, "to_date(to_char(start_time,'DD-MON-YYYY'),'DD-MON-YYYY')", date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            iTotEvents, iTotAlerts, iTotTickets, iTotAutomations, iTotWorkflows = 0, 0, 0, 0, 0
+            dRetFinal = {}
+            try:
+                sEventQuery = "select count(*) as event_count from event_data where " + sWhereCondition1
+                sAlertQuery = "select count(*) as alert_count from alert_data where " + sWhereCondition1
+                sTicketQuery = "select count(tid) as ticket_count from automationengine where tid is not null and " + sWhereCondition2
+                sAutoQuery = "select count(*) as automation_count from automationengine where " + sWhereCondition3
+
+                dEveRS = returnSelectQueryResult(sEventQuery)
+                dAleRS = returnSelectQueryResult(sAlertQuery)
+                dTktRS = returnSelectQueryResult(sTicketQuery)
+                dAutoRS = returnSelectQueryResult(sAutoQuery)
+
+                iTotEvents = dEveRS["data"][0]["event_count"] if dEveRS["result"] == "success" else 0
+                iTotAlerts = dAleRS["data"][0]["alert_count"] if dAleRS["result"] == "success" else 0
+                iTotTickets = dTktRS["data"][0]["ticket_count"] if dTktRS["result"] == "success" else 0
+                iTotAutomations = dAutoRS["data"][0]["automation_count"] if dAutoRS["result"] == "success" else 0
+
+                dRetFinal["Total_Events"] = iTotEvents
+                dRetFinal["Total_Alerts"] = iTotAlerts
+                dRetFinal["Total_Tickets"] = iTotTickets
+                dRetFinal["Total_Automations"] = iTotAutomations
+                return json.dumps({"result": "success", "data": dRetFinal})
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+
+# Bar Chart
+##################################################################################
+
+@app.route(root + '/alertseveritytrend', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def alertseveritytrendBC():
+    """Method: Returns the 7 days severity trend"""
+    #return json.dumps({"result": "failure", "data":"this api method is not active from the version 1.1"})
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sDateQuery = "select alertdate as date from view_7days_severity where severity='WARNING' order by to_date(alertdate,'DD-MON-YYYY') desc"
+                sWarnQuery = "select total as warning from view_7days_severity where severity='WARNING' order by to_date(alertdate,'DD-MON-YYYY') desc"
+                sCriticalQuery = "select total as critical from view_7days_severity where severity='CRITICAL' order by to_date(alertdate,'DD-MON-YYYY') desc"
+                retResult1 = returnSelectQueryResultAsList(sDateQuery)
+                retResult2 = returnSelectQueryResultAsList(sWarnQuery)
+                retResult3 = returnSelectQueryResultAsList(sCriticalQuery)
+                retFinal = retResult1['data']
+                retFinal.update(retResult2['data'])
+                retFinal.update(retResult3['data'])
+                retFinal["result"] = "success"
+                return json.dumps(retFinal)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+# Donuts
+##################################################################################
+
+@app.route(root + '/alertstatus/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getAlertBySeverityStatus(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(to_timestamp(event_created_time),'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQuery = """select 
+	Main.severity, COALESCE(Child.cnt,0) as total
+from 
+	(SELECT X.*
+		FROM   (VALUES ('critical',0),
+				('warning',0),
+				('unknown',0)
+	) AS X (severity,cnt)) as Main
+	left join
+	(select lower(severity) severity, count(lower(severity)) cnt from  alert_data where """ + sWhereCondition1 + """ and lower(severity) not in ('ok') group by lower(severity)) as Child
+	on 
+	Main.severity = Child.severity"""
+                retResult = returnSelectQueryResultConvert2Col2Dict(sQuery,SortByVal=True)
+                return json.dumps(retResult)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/automationstatus/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getAutomationStatus(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(start_time,'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQuery = """select 
+	Main.automation_status, COALESCE(Child.cnt, 0) as total
+from 
+	(SELECT X.*
+		FROM   (VALUES ('inprogress',0),
+				('completed',0),
+				('failed',0)
+	) AS X (automation_status,cnt)) as Main
+	left join
+	(select 
+		lower(automationstatus) automation_status, count(lower(automationstatus)) cnt 
+	from 
+		automationengine where """ + sWhereCondition1 + """
+	group by 
+		lower(automationstatus)) as Child
+	on
+		Main.automation_status = Child.automation_status"""
+                retResult = returnSelectQueryResultConvert2Col2Dict(sQuery,SortByVal=True)
+                return json.dumps(retResult)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/ticketstatus/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getTicketStatus(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(ticketcreatedtime,'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQuery = """select 
+	Main.itsm_status, COALESCE(Child.cnt, 0) as total
+from 
+	(SELECT X.*
+		FROM   (VALUES ('open',0),
+				('in progress',0),
+				('closed successfully',0)
+	) AS X (itsm_status,cnt)) as Main
+	left join
+	(select 
+		lower(itsmstatus) itsm_status, count(lower(itsmstatus)) cnt 
+	from 
+		automationengine where """ + sWhereCondition1 + """
+	group by 
+		lower(itsmstatus)) as Child
+	on
+		Main.itsm_status = Child.itsm_status"""
+                retResult = returnSelectQueryResultConvert2Col2Dict(sQuery,SortByVal=True)
+                return json.dumps(retResult)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/top5component/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getTop5AlertProducingComp(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(to_timestamp(event_created_time),'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQuery = "select component,count(component) as total from alert_data where " + sWhereCondition1 + " group by component order by total desc LIMIT 5"
+                retResult = returnSelectQueryResultConvert2Col2Dict(sQuery,SortByVal=True)
+                return json.dumps(retResult)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+@app.route(root + '/top5automation/<when>/<date>', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getTop5Automation(when,date):
+    """Method: Returns the roles available in backend"""
+    sWhereCondition1 = returnQueryCondition(when,"to_date(to_char(a.start_time,'DD-MON-YYYY'),'DD-MON-YYYY')",date)
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sQuery = """select 
+	b.botname, count(b.botname) total
+from 
+	automationengine a, botrepo b
+where
+	a.botid = b.botid and """ + sWhereCondition1 + """
+group by
+	b.botname
+order by total desc LIMIT 5"""
+                retResult = returnSelectQueryResultConvert2Col2Dict(sQuery,SortByVal=True)
+                return json.dumps(retResult)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+
+# Bar Charts
+##################################################################################
+@app.route(root + '/zseveritytrend1week', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def zget7DaysSeverity():
+    """Method: Returns the 7 days severity trend"""
+    #return json.dumps({"result": "failure", "data":"this api method is not active from the version 1.1"})
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            try:
+                sDateQuery = "select alertdate as date from view_7days_severity where severity='WARNING' order by to_date(alertdate,'DD-MON-YYYY') desc"
+                sWarnQuery = "select total as warning from view_7days_severity where severity='WARNING' order by to_date(alertdate,'DD-MON-YYYY') desc"
+                sCriticalQuery = "select total as critical from view_7days_severity where severity='CRITICAL' order by to_date(alertdate,'DD-MON-YYYY') desc"
+                retResult1 = returnSelectQueryResultAsList(sDateQuery)
+                retResult2 = returnSelectQueryResultAsList(sWarnQuery)
+                retResult3 = returnSelectQueryResultAsList(sCriticalQuery)
+                retFinal = retResult1['data']
+                retFinal.update(retResult2['data'])
+                retFinal.update(retResult3['data'])
+                retFinal["result"] = "success"
+                return json.dumps(retFinal)
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+##################################################################################
+# Automation Section
+##################################################################################
+
+@app.route(root + '/automationstats', methods=['GET'])
+@cross_origin(origin='localhost',headers=['Content- Type','Authorization'])
+def getAutomationStats():
+    """Method: Returns the roles available in backend"""
+    if chkKeyExistsInHeader("SESSIONKEY"):
+        if chkValidRequest(request.headers["SESSIONKEY"]):
+            retFinalDict = {}
+            resTotTicOpenToday, resAlertAttended, resAlertResolved, resTotalBOT, resBotOfDay = 0, 0, 0, 0, 0
+            try:
+                sDate = datetime.now().strftime('%d-%b-%Y')
+                sDate = '11-JUL-2018'
+                sAutoQuery = "select count(*) as total from automationengine where to_date(to_char(ticketcreatedtime,'DD-MON-YYYY'),'DD-MON-YYYY') >= to_date('" + sDate + "','DD-MON-YYYY')"
+                sRet = returnSelectQueryResult(sAutoQuery)
+                if sRet["result"] == "success":
+                    resTotTicOpenToday = sRet["data"][0]["total"]
+
+                sAutoTypeQuery = "select automationtype,count(automationtype) as total from automationengine group by automationtype"
+                sRet = returnSelectQueryResult(sAutoTypeQuery)
+                print(sRet)
+                if sRet["result"] == "success":
+                    if sRet["data"][0]["automationtype"] == "M":
+                        resAlertAttended = sRet["data"][0]["total"]
+                        resAlertResolved = sRet["data"][1]["total"]
+                    else:
+                        resAlertAttended = sRet["data"][1]["total"]
+                        resAlertResolved = sRet["data"][0]["total"]
+
+                sTotBotQuery = "select count(*) as Total from botrepo"
+                sRet = returnSelectQueryResult(sTotBotQuery)
+                print(sRet)
+                if sRet["result"] == "success":
+                    resTotalBOT = sRet["data"][0]["total"]
+
+                sBotOfDayQuery = "select botname from botrepo where botid =(select botid from (select botid,count(botid) as total from automationengine where start_time > '2018-07-11' group by botid order by total desc LIMIT 1) as A)"
+                sRet = returnSelectQueryResult(sBotOfDayQuery)
+                print(sRet)
+                if sRet["result"] == "success":
+                    resBotOfDay = sRet["data"][0]["botname"]
+
+
+                retFinalDict["Total Tickets Opened Today"] = resTotTicOpenToday
+                retFinalDict["Automation Resolved Count"] = resAlertResolved
+                retFinalDict["Automation Attended Count"] = resAlertAttended
+                retFinalDict["Total Bots Count"] = resTotalBOT
+                retFinalDict["Bot of the Day"] = resBotOfDay
+
+                print(retFinalDict)
+                return json.dumps({"result": "success", "data": retFinalDict})
+
+            except Exception as e:
+                return json.dumps({"result": "failure", "data": str(e)})
+        else:
+            return lam_api_key_invalid
+    else:
+        return lam_api_key_missing
+
+if __name__ == '__main__':
+    try:
+        app.run(host='0.0.0.0', port=5008, debug=True)
+        CORS(app)
+    except Exception as e:
+        pass

@@ -1,0 +1,159 @@
+#!/usr/bin/env python
+import sys, os, paramiko, pika, json, logging, psycopg2
+from decoder import decode
+from flask import Flask, jsonify, request
+from logging.handlers import TimedRotatingFileHandler
+from pymongo import MongoClient
+import csv
+# Reading the configuration file for db connection string
+conn = ""
+data = json.load(open('../config/config.json'))
+# Decoding the Password
+maindbpassword = decode('auto!ntell!',data['maindb']['password'])
+settingspassword = decode('auto!ntell!',data['settings']['password'])
+mongopassword = decode('auto!ntell!',data['cmdb']['password'])
+app = Flask(__name__)
+
+# Adding the Logging Configurations
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter( "%(asctime)s | %(pathname)s:%(lineno)d | %(funcName)s | %(levelname)s | %(message)s ")
+handler = TimedRotatingFileHandler('logs/cmdbWorkers.log', when='midnight', interval=1)
+handler.setLevel(logging.DEBUG)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+# Open Reading Key
+key = open(os.path.expanduser('~/.ssh/id_rsa.pub')).read()
+key = key.replace('\r\n','')
+key = key.replace('\n','')
+SECRETDIR = '/usr/local/autointelli/.ssh'
+
+try:
+  #DB Connection String
+  conn = psycopg2.connect(database=data['maindb']['dbname'], user=data['maindb']['username'], password=maindbpassword, host=data['maindb']['dbip'], port=data['maindb']['dbport'])
+  cur = conn.cursor()
+  cur.execute('select configip,configport,dbname,username,password from configuration where configname=\'MQ\'')
+  esbdata = cur.fetchall()
+  esbdata = esbdata[0]
+  esbip = esbdata[0]
+  esbuser = esbdata[3]
+  esbpass = esbdata[4]
+  vhost = esbdata[2]
+  esbpass = decode('123',esbpass)
+  cur.execute('select configip,configport,dbname,username,password from configuration where configname=\'CMDB\'')
+  mongodata = cur.fetchall()
+  mongodata = mongodata[0]
+  #RabbitMQ Connection String
+  credentials = pika.PlainCredentials(esbuser,esbpass)
+  connection = pika.BlockingConnection(pika.ConnectionParameters(host=esbip,credentials=credentials,virtual_host=vhost))
+  channel = connection.channel()
+
+  queue_name = "cmdb.insert" 
+  binding_key = "io.cmdb"
+  channel.queue_bind(exchange='CMDB',
+                       queue=queue_name,
+                       routing_key=binding_key)
+  
+  logger.info("-----Worker Started-----")
+  logger.info("Waiting for Jobs")
+   
+  def key_present(hostname,SECRETDIR):
+    """Checks to see if there is an RSA already present. Returns a bool."""
+    os.system('mkdir -p '+SECRETDIR+'/'+hostname)
+    if hostname  in os.listdir(SECRETDIR+'/'+hostname):
+        return True
+    else:
+        return False
+  
+  def gen_key(hostname,SECRETDIR):
+    """Generate a SSH Key."""
+    os.chdir(SECRETDIR)
+    os.system('ssh-keygen -t rsa -N \'\' -f '+ SECRETDIR+'/'+hostname)
+ 
+  def insertKey(ipaddress, hostname, username, password):
+    try:
+      retval = key_present(hostname,SECRETDIR)
+      if retval:
+        logger.info('Key Already Present')
+      else:
+        os.system('mkdir -p '+SECRETDIR+'/'+hostname)
+        gen_key(hostname,SECRETDIR+'/'+hostname)
+      
+      key = open(os.path.expanduser(SECRETDIR+'/'+hostname+'/'+hostname+'.pub')).read()
+      key = key.replace('\r\n','')
+      key = key.replace('\n','')
+      client=paramiko.SSHClient()
+      client.load_system_host_keys()
+      client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+      client.connect(ipaddress, username=username, password=password)
+      stdin, stdout, stderr = client.exec_command("mkdir -p ~/.ssh/")
+      stdin, stdout, stderr = client.exec_command("echo %s >> ~/.ssh/authorized_keys" % (key))
+      stdout.readlines()
+      stdin, stdout, stderr = client.exec_command("chmod 644 ~/.ssh/authorized_keys")
+      stdin, stdout, stderr = client.exec_command("chmod 700 ~/.ssh")
+      #worker = MongoClient(data['cmdb']['dbip'],username=data['cmdb']['username'],password=mongopassword, authSource=data['cmdb']['authdb'], authMechanism='SCRAM-SHA-1')
+      mclient = MongoClient(mongodata[0], int(mongodata[1]))
+      db = mclient.cmdb
+      db.cimetadata.update({"_id": 1}, {"$set": {"_meta.hostvars."+hostname:{"ansible_ssh_private_key_file": SECRETDIR+'/'+hostname+'/'+hostname}}, "$addToSet": {"group.hosts": hostname}})
+      if hostname in open('/etc/hosts').read():
+        logger.info(hostname+' exists in hosts file')
+      else:
+        os.system("echo %s    %s >> /etc/hosts" % (ipaddress, hostname))
+      return(0,"Success")
+    except Exception as e:
+      return(1,str(e));
+
+  def callback(ch, method, properties, body):
+      logger.info("Received Job")
+      data = json.loads(body.decode('utf-8'))
+      logger.info("Processing Job : " + data['ACTION'])
+      if data['ACTION'] == 'insert':
+        ipaddress = data['ipaddress']
+        hostname = data['hostname']
+        username = data['username']
+        password = data['password'] 
+        JOBID = data['JOBID']
+        cur.execute("""update iojobs set status='InProgress', modifiedtime=now() where jobkey='{0}'""".format(JOBID))
+        logger.info("Total Rows Updated: "+str(cur.rowcount))
+        retVal, stdErr = insertKey(ipaddress, hostname, username, password) 
+        if retVal == 1:
+          logger.warning(stdErr)
+          sys.exit(1)
+        # Ansible Playbooks for Facts Gathering
+        os.system('ansible-playbook -i /usr/local/autointelli/ioengine/services/cmdb/inventory.py /usr/local/autointelli/ioengine/services/KIS/System/Default/GatherFacts.yml -l '+hostname)
+        cur.execute("""update iojobs set status='Completed', modifiedtime=now() where jobkey='{0}'""".format(JOBID))
+        logger.info("Total Rows Updated: "+str(cur.rowcount))
+        conn.commit()
+      elif data['ACTION'] == 'bulkInsert':
+        FOLDER = data['UPLOAD_FOLDER']
+        FILENAME = data['FILENAME']
+        JOBID = data['JOBID']
+        cur.execute("""update iojobs set status='InProgress', modifiedtime=now() where jobkey='{0}'""".format(JOBID))
+        logger.info("Total Rows Updatedi for INPROGRESS: "+str(cur.rowcount))
+        with open(FOLDER+'/'+FILENAME, 'r') as f:
+          reader = csv.reader(f)
+          for row in reader:
+            ipaddress = row[0]
+            hostname = row[1]
+            username = row[2]
+            password = row[3]
+            retVal, stdErr = insertKey(ipaddress, hostname, username, password)
+            if retVal == 1:
+              logger.warning(stdErr)
+              #Notification loop has to be added here for any errors
+              continue
+            # Ansible Playbooks for Facts Gathering
+            os.system('ansible-playbook -i /usr/local/autointelli/ioengine/services/cmdb/inventory.py /usr/local/autointelli/ioengine/services/KIS/System/Default/GatherFacts.yml -l '+hostname)
+            cur.execute("""update iojobs set status='Completed', modifiedtime=now() where jobkey='{0}'""".format(JOBID))
+            logger.info("Total Rows Updated: "+str(cur.rowcount))
+            conn.commit()
+          f.close() 
+      else:
+          logger.warning("API PROCESS : Nothing to DO")
+  channel.basic_consume(callback,
+                      queue=queue_name,
+                      no_ack=True)
+  channel.start_consuming()
+except Exception as e:
+  logger.error("Exception Occured: " + str(e))
